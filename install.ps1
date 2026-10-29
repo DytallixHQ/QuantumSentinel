@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$RepositoryUrl = if ($env:QS_REPOSITORY_URL) { $env:QS_REPOSITORY_URL } else { "https://github.com/exocognosis/QuantumSentinel.git" }
+$RepositoryUrl = if ($env:QS_REPOSITORY_URL) { $env:QS_REPOSITORY_URL } else { "https://github.com/DytallixHQ/QuantumSentinel.git" }
 $InstallDirectory = if ($env:QS_INSTALL_DIR) { $env:QS_INSTALL_DIR } else { Join-Path (Get-Location) "QuantumSentinel" }
 
 function Write-Step {

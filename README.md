@@ -4,8 +4,8 @@ Open-source local scanner that discovers quantum-vulnerable crypto, builds an ev
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js >=20.19](https://img.shields.io/badge/node-%3E%3D20.19-339933.svg)](package.json)
-[![CI](https://github.com/exocognosis/QuantumSentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/exocognosis/QuantumSentinel/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/exocognosis/QuantumSentinel?style=social)](https://github.com/exocognosis/QuantumSentinel/stargazers)
+[![CI](https://github.com/DytallixHQ/QuantumSentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/DytallixHQ/QuantumSentinel/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/DytallixHQ/QuantumSentinel?style=social)](https://github.com/DytallixHQ/QuantumSentinel/stargazers)
 
 <video src="docs/demo/quantumsentinel-demo.mp4" controls muted playsinline width="960">
   Watch the short demo: docs/demo/quantumsentinel-demo.mp4
@@ -15,18 +15,33 @@ If the video does not render, view the GIF preview:
 
 ![QuantumSentinel demo](docs/demo/quantumsentinel-demo.gif)
 
+## Two Ways To Use It
+
+| Form | Where | Best for |
+|------|-------|----------|
+| Hosted scan | [dytallix.com/quantumsentinel](https://dytallix.com/quantumsentinel) | A quick check of one website, public GitHub repository, or file, plus a local connector for approved networks. |
+| Local app (this repository) | Your machine | The full assessment workflow, with a CBOM and an exportable migration plan. |
+
+QuantumSentinel is a [Dytallix](https://dytallix.com/ecosystem/quantumsentinel) product, in alpha.
+Product documentation:
+
+- [Features and functions](docs/product/FEATURES.md), hosted and local side by side.
+- [Architecture](docs/product/ARCHITECTURE.md).
+- [Scan model, scoring, and limits](docs/product/SCAN-MODEL.md).
+- [Roadmap](docs/product/ROADMAP.md).
+
 ## Get Started In 30 Seconds
 
 macOS or Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/exocognosis/QuantumSentinel/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/DytallixHQ/QuantumSentinel/main/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/exocognosis/QuantumSentinel/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/DytallixHQ/QuantumSentinel/main/install.ps1 | iex
 ```
 
 Requirements:
@@ -171,6 +186,8 @@ rm -rf QuantumSentinel
 ```
 
 ## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 Contributor labels:
 
