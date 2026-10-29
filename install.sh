@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPOSITORY_URL="${QS_REPOSITORY_URL:-https://github.com/exocognosis/QuantumSentinel.git}"
+REPOSITORY_URL="${QS_REPOSITORY_URL:-https://github.com/DytallixHQ/QuantumSentinel.git}"
 INSTALL_DIRECTORY="${QS_INSTALL_DIR:-${PWD}/QuantumSentinel}"
 
 say() { printf '%s\n' "$*"; }
