@@ -14,6 +14,7 @@ import {
 } from "./probeScheduler.js";
 import { buildReport, listReportTypes } from "./reporting.js";
 import { scanDomain } from "./domainScanner.js";
+import { attachExports, buildDomainExports, buildFindingsExports } from "./hostedExports.js";
 import { persistRepositoryScan } from "./repositoryScanPersistence.js";
 import { normalizePublicGitHubRepositorySource, runRepositoryScan } from "./repositoryScanRunner.js";
 import { scanUploadedFile } from "./repositoryScanner.js";
@@ -830,6 +831,9 @@ export function createApiServer({
   publicNetworkConnectLimitPerMinute = Number.parseInt(process.env.QS_PUBLIC_NETWORK_CONNECT_LIMIT_PER_MINUTE ?? "10", 10),
   publicNetworkResultLimitPerMinute = Number.parseInt(process.env.QS_PUBLIC_NETWORK_RESULT_LIMIT_PER_MINUTE ?? "10", 10),
   publicNetworkSessions = createPublicNetworkSessionStore(),
+  publicExports = process.env.QS_PUBLIC_EXPORTS === "0"
+    ? { domain: async () => null, findings: async () => null }
+    : { domain: buildDomainExports, findings: buildFindingsExports },
 } = {}) {
   const schedulerRuntime = scheduler ?? createMonitorScheduler({
     datastore,
@@ -891,7 +895,7 @@ export function createApiServer({
           maxFindings: 250,
           maxLines: 50_000,
         });
-        sendJson(response, 200, { data: report });
+        sendJson(response, 200, { data: await attachExports(report, () => publicExports.findings(report, { label: String(payload.filename ?? "file").slice(0, 120) })) });
         return;
       }
 
@@ -952,7 +956,7 @@ export function createApiServer({
           ports: [443],
           timeoutMs: 5_000,
         });
-        sendJson(response, 200, { data: report });
+        sendJson(response, 200, { data: await attachExports(report, () => publicExports.domain(report)) });
         return;
       }
 
@@ -982,7 +986,7 @@ export function createApiServer({
             maxCheckoutBytes: 64 * 1024 * 1024,
             cloneTimeoutMs: 30_000,
           });
-          sendJson(response, 200, { data: report });
+          sendJson(response, 200, { data: await attachExports(report, () => publicExports.findings(report, { repoUrl: source.cloneUrl, label: source.cloneUrl.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") })) });
         } finally {
           publicRepositoryScansInFlight -= 1;
         }

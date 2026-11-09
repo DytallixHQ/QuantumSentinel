@@ -166,7 +166,7 @@ function publicKeyFactor(certificate = {}) {
 function keyExchangeFactor(protocol = {}) {
   const key = protocol.keyExchange ?? {};
   const observation = [key.type, key.name, key.size ? `${key.size}-bit` : null].filter(Boolean).join(" · ") || "Not reported";
-  if (/ML-KEM|KYBER|HYBRID/i.test(observation)) {
+  if (/ML-?KEM|KYBER|HYBRID/i.test(observation)) {
     return factor("key-exchange", "Connection key exchange", 30, 30, "strong", observation,
       "This connection negotiated hybrid or post-quantum key exchange. This reduces the risk that a future quantum computer can decrypt recorded traffic.",
       "Keep hybrid key exchange enabled. Test fallback paths so supported clients cannot be forced to use classical key exchange.");
@@ -290,6 +290,17 @@ export function calculateWebsiteReadinessScore(jobs, { now = Date.now() } = {}) 
   };
 }
 
+/** Negotiated TLS group via the graph engine's raw ClientHello (needs Node >= 22.18); null otherwise. */
+export async function defaultKeyExchangeProbe(host, port, serverName) {
+  if (!process.features?.typescript) return null;
+  const [{ probeTls }, { classifyTlsGroup }] = await Promise.all([
+    import("../src/scanners/network/tls.ts"),
+    import("../src/engine/classifier/registry.ts"),
+  ]);
+  const result = await probeTls(host, port, { serverName, maxVersion: "1.3", timeoutMs: 3_000 });
+  return result.group === undefined ? null : classifyTlsGroup(result.group).label;
+}
+
 export async function scanDomain(domain, options = {}) {
   const { hostname, ports } = normalizeDomainScanInput(domain, options.ports);
   const startedAt = new Date().toISOString();
@@ -302,6 +313,17 @@ export async function scanDomain(domain, options = {}) {
       { mode: "tls", host: hostname, port, timeoutMs: options.timeoutMs ?? 5_000 },
       { connectHost, servername: hostname },
     ));
+  }
+  // Node's TLS client does not report the TLS 1.3 group. Fill it in with one raw ClientHello probe
+  // against the same validated address (no DNS re-resolution).
+  const keyExchangeProbe = options.keyExchangeProbe ?? (options.probe ? null : defaultKeyExchangeProbe);
+  if (keyExchangeProbe) {
+    for (const job of jobs) {
+      const protocol = job.status === "completed" ? job.result?.protocol : null;
+      if (!protocol || protocol.keyExchange?.name) continue;
+      const name = await keyExchangeProbe(connectHost, job.target.port, hostname).catch(() => null);
+      if (name) protocol.keyExchange = { type: null, name, size: null, source: "clienthello-probe" };
+    }
   }
   const findings = jobs.map((job) => findingFromJob(hostname, job)).filter(Boolean);
   const completedAt = new Date().toISOString();

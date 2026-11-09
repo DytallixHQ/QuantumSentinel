@@ -4,7 +4,14 @@
 dist
 docs
 node_modules
-src
+src/*
+!src/core
+!src/engine
+!src/scanners
+!src/exporters
+**/*.test.ts
+**/*.test.js
+src/scanners/filesystem/keyFixtures.ts
 test-fixtures
 *.log
 *.png

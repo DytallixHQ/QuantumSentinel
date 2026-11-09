@@ -94,3 +94,19 @@ test("website readiness score reports unassessed when no service completes", () 
   assert.equal(score.assessmentStatus, "unassessed");
   assert.deepEqual(score.breakdown, []);
 });
+
+test("missing TLS 1.3 group is filled by the key-exchange probe on the validated address and scored", async () => {
+  const seen = [];
+  const report = await scanDomain("example.com", {
+    resolver: { resolve4: async () => ["93.184.216.34"], resolve6: async () => [] },
+    probe: async ({ host, port }) => ({
+      id: "j", status: "completed", target: { mode: "tls", host, port },
+      result: { protocol: { name: "TLSv1.3", cipher: "TLS_AES_256_GCM_SHA384", perfectForwardSecrecy: true, keyExchange: { type: null, name: null, size: null } }, certificate: { algorithm: "ECDSA P-256", expiresAt: "Jan 1 00:00:00 2099 GMT" }, classification: { quantumVulnerable: true, notes: [] } },
+    }),
+    keyExchangeProbe: async (host, port, serverName) => { seen.push([host, port, serverName]); return "X25519MLKEM768"; },
+  });
+  assert.deepEqual(seen, [["93.184.216.34", 443, "example.com"]]);
+  assert.equal(report.services[0].result.protocol.keyExchange.name, "X25519MLKEM768");
+  const kex = report.score.breakdown.find((item) => item.id === "key-exchange" || /key exchange/i.test(item.label ?? item.name ?? ""));
+  assert.equal(kex.score, 30);
+});
