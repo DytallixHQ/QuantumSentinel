@@ -187,7 +187,7 @@ test("CLI: scan --graph --targets --export-cbom", async () => {
     const targets = path.join(dir, "targets.json");
     await writeFile(targets, JSON.stringify(cfg));
     const out: string[] = [];
-    const code = await runGraphCli(["--graph", "--targets", targets, "--export-cbom", path.join(dir, "out/cbom.json"), "--output", path.join(dir, "graph.json")], {
+    const code = await runGraphCli(["--graph", "--targets", targets, "--export-cbom", path.join(dir, "out/cbom.json"), "--output", path.join(dir, "graph.json"), "--html", path.join(dir, "report.html"), "--client", "Fixture Corp"], {
       probes: await mockProbes(), aws: async () => kms, now: NOW, stdout: (s) => out.push(s),
     });
     assert.equal(code, 0);
@@ -198,6 +198,10 @@ test("CLI: scan --graph --targets --export-cbom", async () => {
     const cbom = JSON.parse(await readFile(path.join(dir, "out/cbom.json"), "utf8"));
     assert.equal(cbom.specVersion, "1.7");
     assert.ok((await validator())(cbom));
+    const html = await readFile(path.join(dir, "report.html"), "utf8");
+    assert.match(html, /Fixture Corp/);
+    assert.match(html, /Migration plan/);
+    assert.ok(!html.includes("-----BEGIN"));
     const graph = JSON.parse(await readFile(path.join(dir, "graph.json"), "utf8"));
     assert.ok(graph.vertices.length > 10 && graph.risk.length > 0);
     await assert.rejects(runGraphCli(["--graph"]), /--targets/);

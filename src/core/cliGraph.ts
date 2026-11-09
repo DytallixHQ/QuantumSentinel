@@ -2,14 +2,17 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildCycloneDxCbom } from "../exporters/cyclonedx.ts";
+import { buildHtmlReport } from "../exporters/htmlReport.ts";
 import type { CryptoPrimitive } from "./graph/types.ts";
 import { loadTargets, runGraphScan, type GraphScanDeps } from "./scan.ts";
 
 export const GRAPH_USAGE = `Graph mode:
-  quantumsentinel scan --graph --targets <config.json> [--export-cbom <cbom.json>] [--output <graph.json>] [--json] [--timeout <ms>] [--qday <year>]
+  quantumsentinel scan --graph --targets <config.json> [--export-cbom <cbom.json>] [--html <report.html>] [--client <name>] [--output <graph.json>] [--json] [--timeout <ms>] [--qday <year>]
 
   --targets       Targets config (network, filesystem, code, cloud, groups, relations, risk)
   --export-cbom   Write a CycloneDX 1.7 CBOM
+  --html          Write a self-contained HTML client report (print to PDF from a browser)
+  --client        Client name shown on the HTML report
   --output        Write the attributed graph and risk scores as JSON
   --json          Print the full graph result to stdout
   --timeout       Per-probe network timeout in ms (default 3000)
@@ -19,6 +22,8 @@ export const GRAPH_USAGE = `Graph mode:
 interface GraphArgs {
   targets?: string;
   cbom?: string;
+  html?: string;
+  client?: string;
   output?: string;
   json: boolean;
   timeoutMs?: number;
@@ -38,6 +43,8 @@ export function parseGraphArgs(argv: string[]): GraphArgs {
     if (f === "--graph") continue;
     else if (f === "--targets") a.targets = need(f);
     else if (f === "--export-cbom") a.cbom = need(f);
+    else if (f === "--html") a.html = need(f);
+    else if (f === "--client") a.client = need(f);
     else if (f === "--output" || f === "-o") a.output = need(f);
     else if (f === "--json") a.json = true;
     else if (f === "--timeout") a.timeoutMs = Number(need(f));
@@ -68,6 +75,12 @@ export async function runGraphCli(argv: string[], deps: GraphScanDeps & { stdout
   if (a.cbom) {
     const out = await write(a.cbom, buildCycloneDxCbom(res.graph, { risk: res.risk, toolVersion: deps.version }));
     if (!a.json) print(`CBOM (CycloneDX 1.7): ${out}\n`);
+  }
+  if (a.html) {
+    const out = path.resolve(a.html);
+    await mkdir(path.dirname(out), { recursive: true });
+    await writeFile(out, buildHtmlReport(res.graph, { risk: res.risk, riskConfig: res.riskConfig, client: a.client, errors: res.errors }));
+    if (!a.json) print(`HTML report: ${out}\n`);
   }
   if (a.output) {
     const out = await write(a.output, graphJson);

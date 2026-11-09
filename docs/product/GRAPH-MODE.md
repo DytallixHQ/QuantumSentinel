@@ -6,7 +6,7 @@ CycloneDX 1.7 CBOM. It needs Node.js 22.18 or newer, which runs the TypeScript
 engine in `src/{core,engine,scanners,exporters}` without a build step.
 
 ```
-quantumsentinel scan --graph --targets targets.json --export-cbom cbom.json [--output graph.json] [--json]
+quantumsentinel scan --graph --targets targets.json --export-cbom cbom.json --html report.html [--client "Name"] [--output graph.json] [--json]
 ```
 
 ## What the client receives
@@ -14,6 +14,7 @@ quantumsentinel scan --graph --targets targets.json --export-cbom cbom.json [--o
 | Output | Flag | Content |
 |--------|------|---------|
 | CBOM | `--export-cbom` | CycloneDX 1.7 JSON, validated against the official schema in tests. Components of type `cryptographic-asset` (algorithm, certificate, protocol, related-crypto-material), evidence occurrences, a `dependencies` graph, and `quantumsentinel:*` properties for quantum status and risk score. Other tools that read CycloneDX can import it. |
+| Client report | `--html` (+ `--client <name>`) | Self-contained HTML, with no scripts or remote assets; print it to PDF from a browser. Sections: executive summary, priority risks with their drivers, a migration plan ordered by Mosca score with a concrete action per asset, network endpoints (key exchange in use, accepted groups, classical fallback), certificates, the algorithm inventory, coverage gaps, and method notes. |
 | Graph + risk | `--output` | Every vertex, edge, and risk result with its drivers, as JSON. |
 | Terminal summary | (default) | Counts by quantum status and the ten highest Mosca scores. |
 
