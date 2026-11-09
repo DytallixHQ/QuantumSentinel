@@ -88,8 +88,25 @@ TNFL(v) = C(v) · E(v) · V(v) · max(0, (T_trust     + T_migration) − (T_QDay
 - Through `TERMINATES_AT`, a backend inherits its terminator's status,
   exposure and identity. Through `DEPENDS_ON`, a group takes the worst of its
   members.
+- Propagation is order-independent on cycles. For example, if two services
+  depend on each other, both get the same worst-case result. Each relation is
+  solved per strongly connected component and iterated to a fixed point.
+- Q-Day can be uncertain. Set `risk.qDayDistribution` in the targets file to
+  a list of `{ "year": 2034, "p": 0.2 }` entries. Any probability not
+  assigned means no CRQC within the planning horizon. Each score then adds
+  three fields:
+  - `probability`: Pr[Q-Day comes before retention or trust + migration
+    ends];
+  - `exposureYears`: the expected years of exposure,
+    E[max(0, retention + migration − years to Q-Day)];
+  - `normalizedScore`: (C/10) · E · V · probability, in [0, 1].
+
+  `score` keeps the point estimate `qDayYear`, so existing rankings do not
+  change. Without a distribution, `probability` is 1 or 0 and
+  `exposureYears` is the hinge `max(0, gap)`.
 - The CBOM records both scores as `quantumsentinel:risk.*` and
-  `quantumsentinel:risk.tnfl.*` properties.
+  `quantumsentinel:risk.tnfl.*` properties, including `probability`,
+  `exposureYears` (HNDL) and `normalizedScore`.
 
 ## Scanner notes
 
