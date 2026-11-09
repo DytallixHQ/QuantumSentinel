@@ -17,7 +17,7 @@ Candidates for the next releases. Open or comment on an issue to help
 set the order.
 
 - [ ] Downloadable CBOM and report export from the hosted scan.
-- [ ] Standard CBOM output format for exchange with other tools.
+- [x] Standard CBOM output format for exchange with other tools (CycloneDX 1.7, local graph mode; see GRAPH-MODE.md).
 - [ ] More repository detection rules, tuned from reported false positives.
 - [ ] Dependency and lock-file analysis to see cryptography pulled in by
       libraries.

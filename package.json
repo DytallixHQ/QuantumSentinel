@@ -26,8 +26,11 @@
     "test": "node --test server/*.test.js src/*.test.js",
     "test:api": "node --test server/api.test.js",
     "test:probes": "node --test server/probeEngine.test.js src/probeApi.test.js",
+    "test:graph": "node --test 'src/core/**/*.test.ts' 'src/engine/**/*.test.ts' 'src/scanners/**/*.test.ts'",
+    "typecheck:engine": "tsc -p tsconfig.engine.json",
     "scan": "node scripts/quantumsentinel.mjs scan",
-    "scan-domain": "node scripts/quantumsentinel.mjs scan-domain"
+    "scan-domain": "node scripts/quantumsentinel.mjs scan-domain",
+    "scan-graph": "node scripts/quantumsentinel.mjs scan --graph"
   },
   "dependencies": {
     "jspdf": "^4.2.1",
@@ -42,6 +45,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.2",
+    "ajv": "^8.20.0",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.4.24",

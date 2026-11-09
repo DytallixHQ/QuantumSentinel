@@ -27,4 +27,13 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  {
+    files: ['src/core/**/*.ts', 'src/engine/**/*.ts', 'src/scanners/**/*.ts', 'src/exporters/**/*.ts'],
+    languageOptions: {
+      globals: globals.node,
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { ignoreRestSiblings: true, varsIgnorePattern: '^_' }],
+    },
+  },
 ])
