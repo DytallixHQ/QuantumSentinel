@@ -1,18 +1,25 @@
 # QuantumSentinel features and functions
 
 Columns show where each function is available: the **hosted** scan at
-dytallix.com, and the open-source **local** app.
+dytallix.com, and the open-source **local** app (dashboard, CLI, and graph
+mode). Graph mode (`quantumsentinel scan --graph`) is the full assessment
+engine; see [GRAPH-MODE.md](GRAPH-MODE.md).
 
 ## Evidence collection
 
 | Function | What it does | Hosted | Local |
 |----------|--------------|:------:|:-----:|
-| Website TLS scan | Observes TLS versions, cipher suites, key exchange groups, and certificate algorithms on a public endpoint. Reports whether post-quantum key exchange was observed. Does not crawl pages or test the application. | ✓ | ✓ |
+| Website TLS scan | Observes TLS versions, cipher suites, key exchange groups, and certificate algorithms on a public endpoint. Reports whether hybrid or post-quantum key exchange (for example X25519MLKEM768) was negotiated. Does not crawl pages or test the application. | ✓ | ✓ |
 | Repository scan | Classifies cryptographic references in supported text files of a GitHub repository (local paths too, in the local app). Clones into a temporary directory and deletes it after the scan. | ✓ (public repositories) | ✓ |
 | File scan | Inspects one supported text file up to 512 KB. | ✓ | |
 | Network connector | A connector you run on an approved computer probes the approved scope and uploads responding addresses, service observations, and a summary. The browser cannot inspect a private network on its own. | ✓ | |
 | Authorized network scan | Probes the hosts and bounded ports you enter, directly from your machine. | | ✓ |
 | Device scan | Checks bounded loopback TCP/TLS services on the local machine. | | ✓ |
+| TLS group probing (graph mode) | Raw ClientHello probes: negotiated group, pure ML-KEM support, classical fallback, cipher suites, certificate chain. | | ✓ |
+| SSH (graph mode) | Server KEXINIT: key exchange (including sntrup761 and ML-KEM hybrids), host keys, ciphers. | | ✓ |
+| IKEv2 VPN (graph mode) | IKE_SA_INIT proposals, including RFC 9370 ML-KEM additional key exchange (hybrid). | | ✓ |
+| Certificates and keystores (graph mode) | Content-sniffed PEM/DER X.509, SPKI, PKCS#8, PKCS#12, JKS/JCEKS, OpenPGP, LUKS1/2, BitLocker. Private keys and encrypted containers are never read out or decrypted. | | ✓ |
+| Cloud key managers (graph mode) | Read-only key metadata from AWS KMS, Google Cloud KMS, Azure Key Vault, and HashiCorp Vault Transit. | | ✓ |
 | Authorization step | Every scan requires confirming that you own or are authorized to assess the target. | ✓ | ✓ |
 
 ## What the repository scan recognizes
@@ -38,7 +45,9 @@ it.
 | Q-Day Readiness Score | A prioritization score for website, repository, and file scans, with the drivers behind it. | ✓ | ✓ |
 | Planning horizon | Choose the Q-Day horizon the score is measured against. | | ✓ |
 | Organization and scan scope | Switch results between the whole organization and a single scan. | | ✓ |
-| Cryptographic bill of materials | Build and download a CBOM from the observed evidence. | | ✓ |
+| Cryptographic bill of materials | Download a CycloneDX 1.7 CBOM, validated against the official schema. | ✓ (website, repository, file) | ✓ |
+| Harvest now, decrypt later (HNDL) | Mosca score from how long data must stay confidential, with exposure propagated through proxies and up to clusters. | | ✓ |
+| Trust now, forge later (TNFL) | Mosca score from how long signatures, certificates, trust anchors, and signing keys must stay trusted. | | ✓ |
 
 ## Planning and reporting
 
@@ -48,6 +57,7 @@ it.
 | Decisions | Keep reports and decisions alongside the plan. | | ✓ |
 | Migration plan export | Download the PQC migration plan as a report package. | | ✓ |
 | Command-line reports | Produce JSON and HTML reports for a repository or domain from the command line. | | ✓ |
+| Assessment report | Self-contained HTML report: executive summary, HNDL and TNFL priority risks, migration plan with per-asset actions, endpoints, certificates, algorithm inventory. Print to PDF. | ✓ (website, repository, file) | ✓ |
 
 ## Data handling
 

@@ -5,7 +5,7 @@ import { CryptoGraph } from "../../core/graph/graph.ts";
 import type { NetworkEndpoint, ServiceGroup } from "../../core/graph/types.ts";
 import { moscaScore, resolveRiskConfig, scoreGraph } from "./mosca.ts";
 
-const cfg = resolveRiskConfig({ qDayYear: 2033, currentYear: 2026 });
+const cfg = resolveRiskConfig({ qDayYear: 2033, currentYear: 2026, asOf: "2026-01-01T00:00:00Z" });
 const ev = [{ source: "config" as const, locator: "test", observedAt: "2026-01-01T00:00:00Z" }];
 const ep = (id: string, protocol: NetworkEndpoint["protocol"], posture: NetworkEndpoint["posture"], extra: Partial<NetworkEndpoint> = {}): NetworkEndpoint =>
   ({ id, kind: "NetworkEndpoint", label: id, host: id, port: 1, protocol, posture, evidence: ev, ...extra });
@@ -116,9 +116,12 @@ test("TNFL: hybrid key exchange (HNDL 0) but a classical root trusted past Q-Day
   assert.equal(web.primaryThreat, "TNFL");
   assert.equal(web.combinedScore, web.tnfl.score);
   assert.ok(web.tnfl.drivers.some((d) => /trust anchor/.test(d)));
+  assert.match(web.tnfl.drivers[0], /root/, "the longest-trusted item is listed first");
   // The root certificate itself is ranked, with the exposure of the endpoint that presents it.
   assert.equal(r.get("root")!.tnfl.score, 5 * 1 * 1 * 10);
   assert.equal(r.get("leaf")!.tnfl.score, 0, "a leaf expiring in months is not a TNFL risk on its own");
+  assert.equal(r.get("root")!.score, 0, "certificates carry no HNDL score");
+  assert.equal(r.get("root")!.primaryThreat, "TNFL");
 });
 
 test("TNFL: an ML-DSA chain is not forgeable", () => {
@@ -140,7 +143,7 @@ test("TNFL: signing keys without a validity period use trustYears (KMS, code sig
   g.addEdge("code:sign.js:3", "DEPENDS_ON", addAlgorithm(g, { name: "ECDSA", curve: "P-256", usage: "signature" }, ev));
   g.addVertex(ep("bastion", "SSH", "internal"));
   g.addEdge("bastion", "ENCRYPTED_WITH", addAlgorithm(g, { name: "ssh-ed25519", usage: "signature" }, ev));
-  const r = new Map(scoreGraph(g, resolveRiskConfig({ qDayYear: 2033, currentYear: 2026, defaults: { trustYears: 10 } })).map((x) => [x.id, x]));
+  const r = new Map(scoreGraph(g, resolveRiskConfig({ qDayYear: 2033, currentYear: 2026, asOf: "2026-01-01T00:00:00Z", defaults: { trustYears: 10 } })).map((x) => [x.id, x]));
   assert.equal(r.get("kms:release-signer")!.tnfl.trustYears, 15);
   assert.ok(r.get("kms:release-signer")!.tnfl.score > 0);
   assert.equal(r.get("kms:data")!.tnfl.status, undefined, "symmetric keys have no forgery risk");

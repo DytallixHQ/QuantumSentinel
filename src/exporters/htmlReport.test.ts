@@ -51,7 +51,7 @@ test("HTML report: summary, ordered plan, escaping, no external resources", () =
   assert.match(html, /Coverage gaps[\s\S]*timed out/);
   assert.match(html, /X25519MLKEM768, x25519/);
   assert.match(html, /Endpoints with PQC<\/div><div class="n">1\/4/);
-  assert.ok(!/<script|src=["']http|href=["']http/i.test(html), "self-contained, no scripts or remote assets");
+  assert.ok(!/<script|src=["']http|href=["']http/i.test(html), "self-contained, no scripts or remote assets; no call to action by default");
 });
 
 test("HTML report with nothing at risk", () => {
@@ -60,4 +60,15 @@ test("HTML report with nothing at risk", () => {
   g.addEdge("edge", "ENCRYPTED_WITH", addAlgorithm(g, { name: "X25519MLKEM768", usage: "key-exchange" }, ev));
   const html = buildHtmlReport(g, { risk: scoreGraph(g, cfg), riskConfig: cfg });
   assert.match(html, /No assessed asset exceeds the Mosca threshold/);
+});
+
+test("HTML report call to action is opt-in and https-only", () => {
+  const g = graph();
+  const risk = scoreGraph(g, cfg);
+  const cta = { heading: "Assess <all>", text: "t", url: "https://www.dytallix.com/contact?topic=QuantumSentinel", label: "Discuss" };
+  const html = buildHtmlReport(g, { risk, riskConfig: cfg, cta });
+  assert.match(html, /<div class="cta"><h2>Assess &lt;all&gt;<\/h2>/);
+  assert.match(html, /href="https:\/\/www\.dytallix\.com\/contact\?topic=QuantumSentinel"/);
+  assert.ok(!/<script/i.test(html));
+  assert.ok(!buildHtmlReport(g, { risk, riskConfig: cfg, cta: { ...cta, url: "javascript:alert(1)" } }).includes('class="cta"'));
 });

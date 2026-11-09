@@ -85,7 +85,7 @@ function config(): TargetsConfig {
     cloud: { awsKms: { region: "us-east-1" } },
     groups: [{ id: "payments", label: "Payments cluster", members: ["db", "proxy"], criticality: 10 }],
     relations: [{ from: "db", type: "TERMINATES_AT", to: "proxy" }],
-    risk: { qDayYear: 2033, currentYear: 2026 },
+    risk: { qDayYear: 2033, currentYear: 2026, asOf: "2026-01-01T00:00:00Z" },
   };
 }
 
