@@ -236,6 +236,11 @@ export function classifySsh(name: string, usage?: string): Classification {
 }
 
 export function classifyIkeTransform(type: number, id: number, keyLength?: number): Classification & { label: string } {
+  // ADDKE1..ADDKE7 (types 6-12, RFC 9370) share the KE (type 4) transform ID registry.
+  if (type >= 6 && type <= 12) {
+    const k = classifyIkeTransform(4, id);
+    return { ...k, label: `ADDKE${type - 5}_${k.label}` };
+  }
   const e = IKE_TRANSFORMS[`${type}:${id}`];
   if (!e) return { ...classifyAlgorithm({ name: `ike-${type}-${id}` }), label: `TRANSFORM_${type}_${id}` };
   const name = keyLength && e.name.startsWith("AES") ? e.name.replace("AES", `AES-${keyLength}`) : e.name;

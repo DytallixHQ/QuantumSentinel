@@ -142,15 +142,35 @@ function ingestSsh(g: CryptoGraph, epId: string, k: SshKexInit, ev: Evidence[]):
   ep.classicalFallback = kex.some((x) => RANK[x.c.status] <= 1) && kex.some((x) => x.c.status === "VULNERABLE_SHOR");
 }
 
+/**
+ * IKEv2: each chosen transform is recorded. With RFC 9370, the effective key exchange is the
+ * combination of the KE transform and every additional (ADDKE) one, so "x25519 + ML-KEM-768" is
+ * one HYBRID primitive; the individual parts are linked with `offered: true` for the CBOM.
+ */
 function ingestIke(g: CryptoGraph, epId: string, r: IkeProbeResult, ev: Evidence[]): void {
-  for (const t of r.accepted) {
+  const ep = g.get(epId) as NetworkEndpoint;
+  const kexParts: Array<{ algorithm: string; status: string }> = [];
+  const accepted = r.accepted.filter((t) => !(t.type >= 6 && t.type <= 12 && t.id === 0));
+  if (r.invalidKeGroup !== undefined && !accepted.some((t) => t.type === 4)) accepted.push({ type: 4, id: r.invalidKeGroup });
+  const combine = accepted.some((t) => t.type === 4) && accepted.some((t) => t.type >= 6 && t.type <= 12);
+  for (const t of accepted) {
     const c = classifyIkeTransform(t.type, t.id, t.keyLength);
-    link(g, epId, "ENCRYPTED_WITH", addPrimitive(g, c, ev), { role: c.label, transformType: t.type });
+    const isKex = t.type === 4 || (t.type >= 6 && t.type <= 12);
+    if (isKex) kexParts.push(c);
+    link(g, epId, "ENCRYPTED_WITH", addPrimitive(g, c, ev), {
+      role: isKex ? (combine ? "key-exchange-component" : "key-exchange") : c.label,
+      transformType: t.type,
+      ...(isKex && combine ? { offered: true } : {}),
+      ...(t.type === 4 && r.invalidKeGroup === t.id && !r.accepted.length ? { via: "INVALID_KE_PAYLOAD" } : {}),
+    });
   }
-  if (r.invalidKeGroup !== undefined && !r.accepted.some((t) => t.type === 4)) {
-    const c = classifyIkeTransform(4, r.invalidKeGroup);
-    link(g, epId, "ENCRYPTED_WITH", addPrimitive(g, c, ev), { role: c.label, transformType: 4, via: "INVALID_KE_PAYLOAD" });
+  if (combine) {
+    const name = kexParts.map((k) => k.algorithm).join("+");
+    link(g, epId, "ENCRYPTED_WITH", addAlgorithm(g, { name, usage: "key-exchange" }, [{ ...ev[0], detail: `IKEv2 KE + ADDKE (RFC 9370): ${name}` }]), { role: "key-exchange", rfc9370: true });
   }
+  ep.supportedGroups = kexParts.map((k) => k.algorithm);
+  if (r.classicalFallback !== undefined) ep.classicalFallback = r.classicalFallback;
+  if (r.intermediateSupported) ep.protocolVersion = "IKEv2 (IKE_INTERMEDIATE)";
 }
 
 /**
