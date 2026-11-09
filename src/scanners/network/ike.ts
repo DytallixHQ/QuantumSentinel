@@ -1,4 +1,5 @@
-// IKEv2 IKE_SA_INIT probe (RFC 7296). Sends one initiator request; never completes the exchange.
+// IKEv2 IKE_SA_INIT probe (RFC 7296), with RFC 9370 additional key exchanges (ADDKE) and the
+// RFC 9242 IKE_INTERMEDIATE notification. Sends initiator requests only; never completes the exchange.
 import { randomBytes } from "node:crypto";
 import { udpExchange } from "./io.ts";
 
@@ -19,6 +20,10 @@ const CBC_PROPOSAL: Transform[] = [
 ];
 // Key exchange (type 4). Pure ML-KEM IDs per draft-ietf-ipsecme-ikev2-mlkem.
 export const PROBE_DH = [36, 37, 35, 31, 32, 19, 20, 21, 14, 15, 16, 2];
+// Additional key exchange 1 (transform type 6, RFC 9370): ML-KEM-768/1024/512, or NONE (0) so a
+// responder without ADDKE support can still answer and reveal its classical posture.
+export const PROBE_ADDKE1 = [36, 37, 35, 0];
+const N_INTERMEDIATE_EXCHANGE_SUPPORTED = 16438;
 
 const u16 = (n: number) => [(n >> 8) & 0xff, n & 0xff];
 const u32 = (n: number) => [(n >>> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
@@ -33,16 +38,26 @@ function proposal(num: number, ts: Transform[], last: boolean): number[] {
   return [last ? 0 : 2, 0, ...u16(8 + body.length), num, 1, 0, ts.length, ...body];
 }
 
-export function buildIkeSaInit(opts: { dhGroup?: number; spi?: Uint8Array; nonce?: Uint8Array } = {}): Uint8Array {
+// KE payload sizes. ML-KEM encapsulation keys are all-zero coefficients plus a random seed: a valid
+// encoding that is never used, because the exchange is abandoned after the responder's reply.
+const KE_LEN: Record<number, number> = { 31: 32, 32: 56, 19: 64, 20: 96, 21: 132, 14: 256, 15: 384, 16: 512, 2: 128, 35: 800, 36: 1184, 37: 1568 };
+function keData(group: number): number[] {
+  const len = KE_LEN[group] ?? 32;
+  return [35, 36, 37].includes(group) ? [...new Array(len - 32).fill(0), ...randomBytes(32)] : [...randomBytes(len)];
+}
+
+export function buildIkeSaInit(opts: { dhGroup?: number; addke?: boolean; spi?: Uint8Array; nonce?: Uint8Array } = {}): Uint8Array {
   const dh = opts.dhGroup ?? 31;
-  const dhs = PROBE_DH.map((id) => ({ type: 4, id }));
-  const props = [...proposal(1, [...AEAD_PROPOSAL, ...dhs], false), ...proposal(2, [...CBC_PROPOSAL, ...dhs], true)];
+  const addke = opts.addke !== false;
+  const kex = [...PROBE_DH.map((id) => ({ type: 4, id })), ...(addke ? PROBE_ADDKE1.map((id) => ({ type: 6, id })) : [])];
+  const props = [...proposal(1, [...AEAD_PROPOSAL, ...kex], false), ...proposal(2, [...CBC_PROPOSAL, ...kex], true)];
   const sa = [34, 0, ...u16(4 + props.length), ...props]; // next = KE
-  const keLen = ({ 31: 32, 32: 56, 19: 64, 20: 96, 21: 132, 14: 256, 15: 384, 16: 512, 2: 128 } as Record<number, number>)[dh] ?? 32;
-  const ke = [40, 0, ...u16(8 + keLen), ...u16(dh), 0, 0, ...randomBytes(keLen)]; // next = Nonce
+  const data = keData(dh);
+  const ke = [40, 0, ...u16(8 + data.length), ...u16(dh), 0, 0, ...data]; // next = Nonce
   const nonce = [...(opts.nonce ?? randomBytes(32))];
-  const ni = [0, 0, ...u16(4 + nonce.length), ...nonce];
-  const payloads = [...sa, ...ke, ...ni];
+  const ni = [addke ? 41 : 0, 0, ...u16(4 + nonce.length), ...nonce];
+  const notify = addke ? [0, 0, ...u16(8), 0, 0, ...u16(N_INTERMEDIATE_EXCHANGE_SUPPORTED)] : [];
+  const payloads = [...sa, ...ke, ...ni, ...notify];
   const spi = [...(opts.spi ?? randomBytes(8))];
   const hdr = [...spi, ...new Array(8).fill(0), 33, 0x20, 34, 0x08, ...u32(0), ...u32(28 + payloads.length)];
   return new Uint8Array([...hdr, ...payloads]);
@@ -52,6 +67,8 @@ export interface IkeProbeResult {
   accepted: Transform[]; // transforms in the responder's chosen proposal
   invalidKeGroup?: number; // INVALID_KE_PAYLOAD: responder wants this DH group
   notifyError?: number; // e.g. 14 NO_PROPOSAL_CHOSEN
+  intermediateSupported?: boolean; // responder echoed INTERMEDIATE_EXCHANGE_SUPPORTED (RFC 9242)
+  classicalFallback?: boolean; // an ML-KEM ADDKE was chosen, yet a classical-only proposal is also accepted
 }
 
 export function parseIkeResponse(buf: Uint8Array): IkeProbeResult {
@@ -78,6 +95,7 @@ export function parseIkeResponse(buf: Uint8Array): IkeProbeResult {
       const type = (body[2] << 8) | body[3];
       const spiSize = body[1];
       if (type === 17) out.invalidKeGroup = (body[4 + spiSize] << 8) | body[5 + spiSize];
+      else if (type === N_INTERMEDIATE_EXCHANGE_SUPPORTED) out.intermediateSupported = true;
       else if (type < 16384) out.notifyError = type;
     }
     next = np;
@@ -86,15 +104,31 @@ export function parseIkeResponse(buf: Uint8Array): IkeProbeResult {
   return out;
 }
 
-export async function probeIke(host: string, port = 500, timeoutMs?: number): Promise<IkeProbeResult> {
-  let res = parseIkeResponse(await udpExchange(host, port, buildIkeSaInit(), timeoutMs));
+async function exchange(host: string, port: number, timeoutMs: number | undefined, addke: boolean): Promise<IkeProbeResult> {
+  let res = parseIkeResponse(await udpExchange(host, port, buildIkeSaInit({ addke }), timeoutMs));
   if (res.invalidKeGroup !== undefined && !res.accepted.length) {
     // Retry once with the group the responder asked for; the SA it returns lists the full chosen suite.
     try {
-      const again = parseIkeResponse(await udpExchange(host, port, buildIkeSaInit({ dhGroup: res.invalidKeGroup }), timeoutMs));
+      const again = parseIkeResponse(await udpExchange(host, port, buildIkeSaInit({ dhGroup: res.invalidKeGroup, addke }), timeoutMs));
       res = { ...again, invalidKeGroup: res.invalidKeGroup };
     } catch {
       /* keep the INVALID_KE_PAYLOAD observation */
+    }
+  }
+  return res;
+}
+
+export const hasPqAddke = (r: IkeProbeResult) => r.accepted.some((t) => t.type >= 6 && t.type <= 12 && t.id !== 0);
+
+export async function probeIke(host: string, port = 500, timeoutMs?: number): Promise<IkeProbeResult> {
+  const res = await exchange(host, port, timeoutMs, true);
+  if (hasPqAddke(res)) {
+    // Does the gateway still accept initiators that offer no additional key exchange?
+    try {
+      const classical = await exchange(host, port, timeoutMs, false);
+      res.classicalFallback = classical.accepted.some((t) => t.type === 4);
+    } catch {
+      res.classicalFallback = false;
     }
   }
   return res;

@@ -85,11 +85,13 @@ R(v) = C(v) · E(v) · V(v) · max(0, (T_retention + T_migration) − (T_QDay �
   `offered: true`. If a server pairs a PQ option with continued acceptance of
   classical clients, it gets `classicalFallback: true` and a risk driver for
   it, but the fallback does not change its HNDL status.
-- **IKEv2**: the probe sends one `IKE_SA_INIT` (UDP/500) and retries once
-  on `INVALID_KE_PAYLOAD`. Limitation: RFC 9370 additional key exchanges
-  (ADDKE, transform types 6 and up) are neither offered nor parsed, so a
-  gateway that pairs classical KE with ML-KEM through ADDKE is reported by
-  its classical KE alone.
+- **IKEv2**: one `IKE_SA_INIT` (UDP/500), retried once on
+  `INVALID_KE_PAYLOAD`. It offers ML-KEM-768/1024/512 as an RFC 9370
+  additional key exchange (ADDKE1, with NONE allowed) and signals RFC 9242
+  `INTERMEDIATE_EXCHANGE_SUPPORTED`. If the gateway picks a classical KE plus
+  an ML-KEM ADDKE, the effective key exchange is recorded as one HYBRID
+  primitive (for example `X25519+ML-KEM-768`), and each part is still
+  exported. A second offer with no ADDKE then checks for classical fallback.
 - **Files**: types are detected from content, not extensions (PEM, DER
   X.509, SPKI, PKCS#8, PKCS#12, JKS/JCEKS, OpenPGP, LUKS1/2, BitLocker).
   Encrypted keys and PKCS#12 bags are never decrypted. An unencrypted private

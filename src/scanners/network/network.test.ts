@@ -7,6 +7,7 @@ import test from "node:test";
 import type { CryptoMaterial, CryptoPrimitive, NetworkEndpoint } from "../../core/graph/types.ts";
 import { parsePem } from "../filesystem/der.ts";
 import { buildIkeSaInit, parseIkeResponse } from "./ike.ts";
+import { resolveRiskConfig, scoreGraph } from "../../engine/risk/mosca.ts";
 import { LIVE_PROBES, scanNetwork } from "./index.ts";
 import { interpretSsh } from "./ssh.ts";
 import { buildClientHello, HRR_RANDOM, interpretFlight, parseServerFlight } from "./tls.ts";
@@ -58,14 +59,15 @@ function sshServerBytes(kex: string[], hostKey: string[], enc: string[]): Uint8A
   return new Uint8Array([...Buffer.from("SSH-2.0-OpenSSH_9.9 test\r\n"), ...pkt]);
 }
 
-function ikeResponse(transforms: Array<[number, number, number?]>): Uint8Array {
+function ikeResponse(transforms: Array<[number, number, number?]>, notifyType?: number): Uint8Array {
   const ts = transforms.flatMap(([type, id, kl], i) => {
     const attrs = kl ? [0x80, 0x0e, ...u16(kl)] : [];
     return [i === transforms.length - 1 ? 0 : 3, 0, ...u16(8 + attrs.length), type, 0, ...u16(id), ...attrs];
   });
   const prop = [0, 0, ...u16(8 + ts.length), 1, 1, 0, transforms.length, ...ts];
-  const sa = [0, 0, ...u16(4 + prop.length), ...prop];
-  return new Uint8Array([...new Array(8).fill(1), ...new Array(8).fill(2), 33, 0x20, 34, 0x20, ...u32(0), ...u32(28 + sa.length), ...sa]);
+  const notify = notifyType ? [0, 0, ...u16(8), 0, 0, ...u16(notifyType)] : [];
+  const sa = [notifyType ? 41 : 0, 0, ...u16(4 + prop.length), ...prop];
+  return new Uint8Array([...new Array(8).fill(1), ...new Array(8).fill(2), 33, 0x20, 34, 0x20, ...u32(0), ...u32(28 + sa.length + notify.length), ...sa, ...notify]);
 }
 
 function ikeInvalidKe(group: number): Uint8Array {
@@ -220,6 +222,105 @@ test("graceful timeouts: silent server, refused port, unroutable host, silent UD
     assert.equal(graph.allVertices("NetworkEndpoint").length, 4, "endpoints recorded even when unreachable");
   } finally {
     await silent.close();
+    udp.close();
+  }
+});
+
+
+// ---------------------------------------------------------------- RFC 9370 additional key exchange
+
+/** Walk the transforms of every proposal in an IKE_SA_INIT request; returns "type:id" strings. */
+function requestTransforms(req: Uint8Array): { transforms: string[]; notifies: number[] } {
+  const transforms: string[] = [];
+  const notifies: number[] = [];
+  let next = req[16];
+  let p = 28;
+  while (next !== 0 && p + 4 <= req.length) {
+    const np = req[p];
+    const len = (req[p + 2] << 8) | req[p + 3];
+    if (next === 33) {
+      let q = p + 4;
+      while (q < p + len) {
+        const plen = (req[q + 2] << 8) | req[q + 3];
+        let t = q + 8 + req[q + 6];
+        while (t < q + plen) {
+          const tlen = (req[t + 2] << 8) | req[t + 3];
+          transforms.push(`${req[t + 4]}:${(req[t + 6] << 8) | req[t + 7]}`);
+          t += tlen;
+        }
+        q += plen;
+      }
+    } else if (next === 41) notifies.push((req[p + 6] << 8) | req[p + 7]);
+    next = np;
+    p += len;
+  }
+  return { transforms, notifies };
+}
+
+test("IKE_SA_INIT offers ML-KEM as ADDKE1 with NONE and signals IKE_INTERMEDIATE", () => {
+  const req = buildIkeSaInit();
+  const { transforms, notifies } = requestTransforms(req);
+  for (const t of ["6:36", "6:37", "6:35", "6:0", "4:31", "4:36"]) assert.ok(transforms.includes(t), t);
+  assert.deepEqual(notifies, [16438]);
+  assert.equal(new DataView(req.buffer).getUint32(24), req.length);
+  const classical = requestTransforms(buildIkeSaInit({ addke: false }));
+  assert.ok(!classical.transforms.some((t) => t.startsWith("6:")));
+  assert.deepEqual(classical.notifies, []);
+  // An ML-KEM-768 KE payload carries a 1184-byte encapsulation key.
+  const mlkem = buildIkeSaInit({ dhGroup: 36 });
+  assert.ok(mlkem.length > 1184 + 28);
+});
+
+test("ADDKE responses parse, including the IKE_INTERMEDIATE notify", () => {
+  const r = parseIkeResponse(ikeResponse([[1, 20, 256], [2, 7], [4, 31], [6, 36]], 16438));
+  assert.deepEqual(r.accepted.map((t) => `${t.type}:${t.id}`), ["1:20", "2:7", "4:31", "6:36"]);
+  assert.equal(r.intermediateSupported, true);
+});
+
+test("loopback gateway: x25519 + ML-KEM-768 ADDKE rates HYBRID, classical-only acceptance is flagged", async () => {
+  const udp = dgram.createSocket("udp4");
+  udp.on("message", (msg, rinfo) => {
+    const wantsAddke = requestTransforms(new Uint8Array(msg)).notifies.includes(16438);
+    const reply = wantsAddke ? ikeResponse([[1, 20, 256], [2, 7], [4, 31], [6, 36]], 16438) : ikeResponse([[1, 20, 256], [2, 7], [4, 31]]);
+    udp.send(reply, rinfo.port, rinfo.address);
+  });
+  await new Promise<void>((r) => udp.bind(0, "127.0.0.1", r));
+  try {
+    const { graph, errors } = await scanNetwork([{ host: "127.0.0.1", port: (udp.address() as net.AddressInfo).port, protocol: "ikev2", posture: "external", id: "vpn" }], { timeoutMs: 1500, now: NOW });
+    assert.deepEqual(errors, []);
+    const vpn = graph.get("vpn") as NetworkEndpoint;
+    assert.equal(vpn.classicalFallback, true);
+    assert.equal(vpn.protocolVersion, "IKEv2 (IKE_INTERMEDIATE)");
+    assert.deepEqual(vpn.supportedGroups, ["X25519", "ML-KEM-768"]);
+    const effective = graph.outgoing("vpn", ["ENCRYPTED_WITH"]).filter((e) => e.attrs?.role === "key-exchange").map((e) => graph.get(e.to) as CryptoPrimitive);
+    assert.deepEqual(effective.map((p) => `${p.algorithm}:${p.status}`), ["X25519+ML-KEM-768:HYBRID"]);
+    assert.ok(graph.outgoing("vpn", ["ENCRYPTED_WITH"]).filter((e) => e.attrs?.role === "key-exchange-component").every((e) => e.attrs?.offered === true));
+    const [risk] = scoreGraph(graph, resolveRiskConfig({ qDayYear: 2033, currentYear: 2026 }));
+    assert.equal(risk.status, "HYBRID");
+    assert.equal(risk.score, 0);
+    assert.ok(risk.drivers.some((d) => /classical fallback/.test(d)));
+  } finally {
+    udp.close();
+  }
+});
+
+test("gateway that answers the ML-KEM offer with ADDKE NONE stays classical", async () => {
+  let requests = 0;
+  const udp = dgram.createSocket("udp4");
+  udp.on("message", (_msg, rinfo) => {
+    requests++;
+    udp.send(ikeResponse([[1, 20, 256], [2, 7], [4, 19], [6, 0]]), rinfo.port, rinfo.address);
+  });
+  await new Promise<void>((r) => udp.bind(0, "127.0.0.1", r));
+  try {
+    const { graph } = await scanNetwork([{ host: "127.0.0.1", port: (udp.address() as net.AddressInfo).port, protocol: "ikev2", posture: "external", id: "vpn" }], { timeoutMs: 1500, now: NOW });
+    assert.equal(requests, 1, "no fallback probe when no PQ ADDKE was chosen");
+    const kex = graph.outgoing("vpn", ["ENCRYPTED_WITH"]).filter((e) => e.attrs?.role === "key-exchange").map((e) => (graph.get(e.to) as CryptoPrimitive).algorithm);
+    assert.deepEqual(kex, ["ECDH-P-256"]);
+    assert.equal((graph.get("vpn") as NetworkEndpoint).classicalFallback, undefined);
+    const [risk] = scoreGraph(graph, resolveRiskConfig({ qDayYear: 2033, currentYear: 2026 }));
+    assert.equal(risk.status, "VULNERABLE_SHOR");
+  } finally {
     udp.close();
   }
 });
