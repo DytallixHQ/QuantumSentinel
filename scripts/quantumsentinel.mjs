@@ -24,7 +24,7 @@ Options:
   --help, -h      Show this help
 
 Graph mode (Node.js >= 22.18):
-  quantumsentinel scan --graph --targets <config.json> [--export-cbom <cbom.json>] [--output <graph.json>] [--json]
+  quantumsentinel scan --graph --targets <config.json> [--export-cbom <cbom.json>] [--html <report.html>] [--client <name>] [--output <graph.json>] [--json]
   Builds an attributed cryptographic graph across network, file, code and KMS targets,
   scores Mosca/HNDL risk, and exports a CycloneDX 1.7 CBOM.
 `;

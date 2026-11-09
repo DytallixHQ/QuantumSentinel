@@ -69,6 +69,7 @@ export interface GraphScanDeps {
 export interface GraphScanResult {
   graph: CryptoGraph;
   risk: RiskResult[];
+  riskConfig: RiskConfig;
   errors: ProbeError[];
 }
 
@@ -145,8 +146,9 @@ export async function runGraphScan(cfg: TargetsConfig, baseDir = process.cwd(), 
     else errors.push({ target: `${r.from} -> ${r.to}`, error: "relation endpoint not found in graph" });
   }
 
-  const risk = scoreGraph(g, resolveRiskConfig(cfg.risk));
-  return { graph: g, risk, errors };
+  const riskConfig = resolveRiskConfig(cfg.risk);
+  const risk = scoreGraph(g, riskConfig);
+  return { graph: g, risk, riskConfig, errors };
 }
 
 export { buildCycloneDxCbom };

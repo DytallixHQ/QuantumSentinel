@@ -26,7 +26,7 @@
     "test": "node --test server/*.test.js src/*.test.js",
     "test:api": "node --test server/api.test.js",
     "test:probes": "node --test server/probeEngine.test.js src/probeApi.test.js",
-    "test:graph": "node --test 'src/core/**/*.test.ts' 'src/engine/**/*.test.ts' 'src/scanners/**/*.test.ts'",
+    "test:graph": "node --test 'src/core/**/*.test.ts' 'src/engine/**/*.test.ts' 'src/scanners/**/*.test.ts' 'src/exporters/**/*.test.ts'",
     "typecheck:engine": "tsc -p tsconfig.engine.json",
     "scan": "node scripts/quantumsentinel.mjs scan",
     "scan-domain": "node scripts/quantumsentinel.mjs scan-domain",
