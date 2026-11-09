@@ -22,6 +22,11 @@ Options:
   --datastore     Persist scan evidence into a QuantumSentinel datastore
   --ports         Bounded TLS service ports for scan-domain
   --help, -h      Show this help
+
+Graph mode (Node.js >= 22.18):
+  quantumsentinel scan --graph --targets <config.json> [--export-cbom <cbom.json>] [--output <graph.json>] [--json]
+  Builds an attributed cryptographic graph across network, file, code and KMS targets,
+  scores Mosca/HNDL risk, and exports a CycloneDX 1.7 CBOM.
 `;
 }
 function parseArguments(argv) {
@@ -77,7 +82,20 @@ function humanSummary(report) {
   }
   return lines.join("\n");
 }
-try {
+const rawArgs = process.argv.slice(2);
+if (rawArgs[0] === "scan" && rawArgs.includes("--graph")) {
+  if (!process.features.typescript) {
+    process.stderr.write("QuantumSentinel: graph mode needs Node.js >= 22.18 (built-in TypeScript type stripping).\n");
+    process.exit(1);
+  }
+  try {
+    const { runGraphCli } = await import("../src/core/cliGraph.ts");
+    process.exitCode = await runGraphCli(rawArgs.slice(1));
+  } catch (error) {
+    process.stderr.write(`QuantumSentinel: ${error.message}\n`);
+    process.exitCode = 1;
+  }
+} else try {
   const options = parseArguments(process.argv.slice(2));
   if (options.help) { process.stdout.write(usage()); process.exit(0); }
   const report = options.command === "scan-domain"

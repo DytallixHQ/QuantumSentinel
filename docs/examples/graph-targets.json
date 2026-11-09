@@ -1,0 +1,33 @@
+{
+  "authorization": {
+    "confirmed": true,
+    "owner": "Example Corp security team",
+    "reference": "Change ticket SEC-1234"
+  },
+  "network": [
+    { "id": "edge-proxy", "host": "www.example.com", "protocol": "tls", "posture": "external", "criticality": 6 },
+    { "id": "bastion", "host": "bastion.example.internal", "protocol": "ssh", "posture": "internal" },
+    { "id": "vpn", "host": "vpn.example.com", "protocol": "ikev2", "posture": "external" },
+    { "id": "orders-db", "host": "10.0.0.5", "port": 5432, "protocol": "tcp", "posture": "internal", "criticality": 9, "retentionYears": 10, "migrationYears": 4 }
+  ],
+  "filesystem": [
+    { "path": "/etc/ssl", "mountPoint": "/", "owner": "root" }
+  ],
+  "code": [
+    { "path": "../services/orders" }
+  ],
+  "cloud": {
+    "awsKms": { "region": "us-east-1" },
+    "vault": { "address": "https://vault.example.internal:8200", "mount": "transit", "tokenEnv": "VAULT_TOKEN" }
+  },
+  "groups": [
+    { "id": "payments", "label": "Payments cluster", "members": ["orders-db", "edge-proxy"], "criticality": 10 }
+  ],
+  "relations": [
+    { "from": "orders-db", "type": "TERMINATES_AT", "to": "edge-proxy" }
+  ],
+  "risk": {
+    "qDayYear": 2033,
+    "defaults": { "criticality": 5, "retentionYears": 5, "migrationYears": 3 }
+  }
+}
