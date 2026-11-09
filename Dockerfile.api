@@ -1,4 +1,5 @@
-FROM node:20.19.5-bookworm-slim
+# Node 24 bundles OpenSSL 3.5 and runs the TypeScript graph engine natively (CBOM/report exports).
+FROM node:24.16.0-bookworm-slim
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
@@ -12,6 +13,10 @@ RUN apt-get update \
 
 COPY --chown=node:node package.json ./package.json
 COPY --chown=node:node server ./server
+COPY --chown=node:node src/core ./src/core
+COPY --chown=node:node src/engine ./src/engine
+COPY --chown=node:node src/scanners ./src/scanners
+COPY --chown=node:node src/exporters ./src/exporters
 
 USER node
 
