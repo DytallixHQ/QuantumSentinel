@@ -96,10 +96,17 @@ export async function runGraphCli(argv: string[], deps: GraphScanDeps & { stdout
     `QuantumSentinel graph scan: ${res.graph.size.vertices} vertices, ${res.graph.size.edges} edges`,
     `Primitives: ${Object.entries(counts).sort().map(([k, v]) => `${k}=${v}`).join(" ") || "none"}`,
     "",
-    "Top Mosca/HNDL risk (assets; certificates and keys are in --output/CBOM):",
-    ...res.risk.filter((r) => r.score > 0 && res.graph.get(r.id)?.kind !== "CryptoMaterial").slice(0, 10).map((r) => `  ${r.score.toFixed(1).padStart(6)}  ${r.status.padEnd(16)} ${r.id}`),
+    "Top risk (assets; HNDL = harvest now, decrypt later; TNFL = trust now, forge later):",
+    "   HNDL    TNFL  status            asset",
+    ...res.risk.filter((r) => r.combinedScore > 0 && res.graph.get(r.id)?.kind !== "CryptoMaterial").slice(0, 10)
+      .map((r) => `  ${r.score.toFixed(1).padStart(5)}  ${r.tnfl.score.toFixed(1).padStart(6)}  ${(r.primaryThreat === "TNFL" ? r.tnfl.status ?? "" : r.status).padEnd(16)}  ${r.id}`),
   ];
-  if (!res.risk.some((r) => r.score > 0 && res.graph.get(r.id)?.kind !== "CryptoMaterial")) lines.push("  (no asset exceeds the Mosca threshold)");
+  if (!res.risk.some((r) => r.combinedScore > 0 && res.graph.get(r.id)?.kind !== "CryptoMaterial")) lines.push("  (no asset exceeds the Mosca threshold)");
+  const forgeable = res.risk.filter((r) => r.tnfl.score > 0 && res.graph.get(r.id)?.kind === "CryptoMaterial").sort((a, b) => b.tnfl.score - a.tnfl.score).slice(0, 5);
+  if (forgeable.length) {
+    lines.push("", "Signatures trusted past Q-Day (certificates and signing keys):");
+    for (const r of forgeable) lines.push(`  ${r.tnfl.score.toFixed(1).padStart(6)}  trusted ${r.tnfl.trustYears} y  ${res.graph.get(r.id)?.label ?? r.id}`);
+  }
   if (res.errors.length) lines.push("", `Probe/ingest errors (${res.errors.length}):`, ...res.errors.slice(0, 20).map((e) => `  ${e.target}: ${e.error}`));
   print(`${lines.join("\n")}\n`);
   return 0;

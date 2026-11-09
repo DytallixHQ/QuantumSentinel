@@ -27,6 +27,7 @@ export interface RiskInputs {
   exposureFactor?: number; // E(v) in [0.1, 1.0]
   retentionYears?: number; // T_retention(v): how long data must stay confidential
   migrationYears?: number; // T_migration(v): how long migration will take
+  trustYears?: number; // T_trust(v): how long signatures made or relied on here must stay unforgeable (TNFL)
 }
 
 interface VertexBase<K extends string> extends RiskInputs {

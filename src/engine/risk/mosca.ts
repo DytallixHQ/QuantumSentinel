@@ -10,6 +10,8 @@ export interface RiskConfig {
     criticality: number;
     retentionYears: number;
     migrationYears: number;
+    /** T_trust for signing keys without a validity period (code, firmware, document, KMS signing keys). */
+    trustYears: number;
     exposure: { external: number; internal: number; unknown: number };
   };
   /**
@@ -23,7 +25,7 @@ export interface RiskConfig {
 export const DEFAULT_RISK_CONFIG: RiskConfig = {
   qDayYear: 2033,
   currentYear: new Date().getUTCFullYear(),
-  defaults: { criticality: 5, retentionYears: 5, migrationYears: 3, exposure: { external: 1.0, internal: 0.3, unknown: 0.5 } },
+  defaults: { criticality: 5, retentionYears: 5, migrationYears: 3, trustYears: 5, exposure: { external: 1.0, internal: 0.3, unknown: 0.5 } },
   statusWeight: { PLAINTEXT: 1, VULNERABLE_SHOR: 1, UNKNOWN: 0.5, DEGRADED_GROVER: 0.25, HYBRID: 0, SAFE_PQC: 0 },
 };
 
@@ -47,6 +49,22 @@ export interface RiskResult {
   /** (T_retention + T_migration) - (T_Q-Day - now), before max(0, .) */
   moscaGapYears: number;
   drivers: string[];
+  /** Trust now, forge later: signatures that must stay unforgeable past Q-Day. */
+  tnfl: TnflResult;
+  /** max(HNDL score, TNFL score); used for ranking. */
+  combinedScore: number;
+  primaryThreat: "HNDL" | "TNFL" | "none";
+}
+
+export interface TnflResult {
+  score: number;
+  /** Worst signature/authentication status observed; undefined when no signature evidence exists. */
+  status?: EffectiveStatus;
+  /** T_trust: how long signatures made or relied on here must stay unforgeable. */
+  trustYears: number;
+  /** (T_trust + T_migration) - (T_Q-Day - now), before max(0, .) */
+  gapYears: number;
+  drivers: string[];
 }
 
 // Higher = worse.
@@ -58,6 +76,19 @@ export function worstStatus(statuses: Iterable<EffectiveStatus>): EffectiveStatu
 }
 
 const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x));
+// Usages whose quantum break enables forgery (authentication, identity, signing). RSA keys in
+// certificates are classified "public-key" and authenticate the holder.
+const SIGNATURE_USAGES = new Set(["signature", "public-key"]);
+const YEAR_MS = 365.25 * 86_400_000;
+
+interface TnflBase {
+  status?: EffectiveStatus;
+  trustYears?: number;
+  criticality?: number;
+  exposure?: number;
+  drivers: string[];
+}
+
 const CONFIDENTIALITY_USAGES = new Set(["key-exchange", "encryption", "public-key", "kem", "key-agree", "pke", "kdf", "mac", "unknown"]);
 
 /**
@@ -76,6 +107,7 @@ export class RiskEngine {
   private readonly baseMemo = new Map<string, { status?: EffectiveStatus; drivers: string[] }>();
   private readonly effMemo = new Map<string, { status?: EffectiveStatus; exposure: number; drivers: string[] }>();
   private readonly results = new Map<string, RiskResult>();
+  private readonly tnflMemo = new Map<string, TnflBase>();
 
   constructor(graph: CryptoGraph, cfg: RiskConfig = DEFAULT_RISK_CONFIG) {
     this.g = graph;
@@ -174,6 +206,95 @@ export class RiskEngine {
     return out;
   }
 
+  /** Years from now until a certificate's notAfter (fractional), or undefined. */
+  private remainingYears(notAfter: string | undefined): number | undefined {
+    if (!notAfter) return undefined;
+    const t = Date.parse(notAfter);
+    if (Number.isNaN(t)) return undefined;
+    const now = Date.UTC(this.cfg.currentYear, 0, 1);
+    return Math.max(0, (t - now) / YEAR_MS);
+  }
+
+  /**
+   * Trust-now-forge-later evidence for one vertex: the signature algorithms it relies on and how long
+   * they must stay unforgeable. Certificates use their remaining validity (long-lived roots dominate);
+   * signing keys without a validity use trustYears; holders and groups take the worst of what they hold.
+   */
+  private tnflBase(id: string, stack = new Set<string>()): TnflBase {
+    const memo = this.tnflMemo.get(id);
+    if (memo) return memo;
+    if (stack.has(id)) return { drivers: [] };
+    stack.add(id);
+    const v = this.g.get(id)!;
+    const out: TnflBase = { drivers: [] };
+    const consider = (status: EffectiveStatus | undefined, trust: number | undefined, driver: string) => {
+      if (status === undefined) return;
+      if (out.status === undefined || SEVERITY[status] > SEVERITY[out.status]) out.status = status;
+      if (trust !== undefined && SEVERITY[status] >= SEVERITY.DEGRADED_GROVER) out.trustYears = Math.max(out.trustYears ?? 0, trust);
+      if (SEVERITY[status] >= SEVERITY.DEGRADED_GROVER) out.drivers.push(driver);
+    };
+    const defaultTrust = v.trustYears ?? this.cfg.defaults.trustYears;
+    const sigPrims = (from: string, types: Array<"ENCRYPTED_WITH" | "DEPENDS_ON">) =>
+      this.g.outgoing(from, types)
+        .filter((e) => e.attrs?.offered !== true)
+        .map((e) => this.g.get(e.to))
+        .filter((p): p is CryptoPrimitive => p?.kind === "CryptoPrimitive" && SIGNATURE_USAGES.has(p.usage));
+
+    if (v.kind === "CryptoMaterial") {
+      if (v.materialType === "certificate") {
+        const trust = v.trustYears ?? this.remainingYears(v.notAfter) ?? defaultTrust;
+        const anchor = v.subject && v.subject === v.issuer ? "trust anchor " : "";
+        for (const p of sigPrims(id, ["ENCRYPTED_WITH"])) consider(p.status, trust, `${anchor}certificate key ${p.algorithm} trusted ${trust.toFixed(1)} more years`);
+        for (const e of this.g.incoming(id, ["SIGNS"])) {
+          const s = this.g.get(e.from);
+          if (s?.kind === "CryptoPrimitive") consider(s.status, trust, `signed with ${s.algorithm}`);
+        }
+      } else if (v.materialType !== "secret-key-ref") {
+        for (const p of sigPrims(id, ["ENCRYPTED_WITH"])) consider(p.status, defaultTrust, `${p.algorithm} signing/identity key trusted ${defaultTrust} years`);
+      }
+    } else if (v.kind !== "CryptoPrimitive") {
+      // Direct authentication primitives (SSH host keys, code-signing references).
+      for (const p of sigPrims(id, ["ENCRYPTED_WITH", "DEPENDS_ON"])) consider(p.status, defaultTrust, `${p.algorithm} ${p.usage === "signature" ? "signatures" : "identity key"}`);
+      // Held certificates/keys, member assets, and the terminator that authenticates for us.
+      const related = [
+        ...this.g.outgoing(id, ["CONTAINS_KEY", "MOUNTS", "TERMINATES_AT"]).map((e) => e.to),
+        ...this.g.outgoing(id, ["DEPENDS_ON"]).map((e) => e.to).filter((t) => this.g.get(t)?.kind !== "CryptoPrimitive"),
+      ];
+      for (const t of related) {
+        const r = this.tnflBase(t, stack);
+        if (r.status === undefined) continue;
+        if (out.status === undefined || SEVERITY[r.status] > SEVERITY[out.status]) out.status = r.status;
+        if (r.trustYears !== undefined) out.trustYears = Math.max(out.trustYears ?? 0, r.trustYears);
+        if (r.criticality !== undefined) out.criticality = Math.max(out.criticality ?? 0, r.criticality);
+        if (r.exposure !== undefined) out.exposure = Math.max(out.exposure ?? 0, r.exposure);
+        if (SEVERITY[r.status] >= SEVERITY.DEGRADED_GROVER) out.drivers.push(`via ${this.g.get(t)?.label ?? t}: ${r.drivers[0] ?? r.status}`);
+      }
+    }
+    // Certificates and keys inherit the criticality and exposure of the assets that present them.
+    if (v.kind === "CryptoMaterial") {
+      for (const e of this.g.incoming(id, ["CONTAINS_KEY"])) {
+        const h = this.g.get(e.from)!;
+        out.criticality = Math.max(out.criticality ?? 0, h.criticality ?? 0) || undefined;
+        out.exposure = Math.max(out.exposure ?? 0, this.ownExposure(h));
+      }
+    }
+    out.drivers = [...new Set(out.drivers)].slice(0, 6);
+    stack.delete(id);
+    this.tnflMemo.set(id, out);
+    return out;
+  }
+
+  private tnfl(id: string, criticality: number, exposure: number, migration: number): TnflResult {
+    const v = this.g.get(id)!;
+    const b = this.tnflBase(id);
+    if (b.status === undefined || b.trustYears === undefined) return { score: 0, status: b.status, trustYears: b.trustYears ?? 0, gapYears: 0, drivers: b.drivers };
+    const c = Math.max(criticality, v.criticality === undefined ? b.criticality ?? 0 : 0) || criticality;
+    const e = Math.max(exposure, b.exposure ?? 0);
+    const trust = Math.round(b.trustYears * 10) / 10; // planning precision: 0.1 year
+    const { score, gap } = moscaScore(c, e, this.cfg.statusWeight[b.status], trust, migration, this.cfg);
+    return { score: round(score), status: b.status, trustYears: trust, gapYears: round(gap), drivers: b.drivers };
+  }
+
   private score(id: string, stack = new Set<string>()): RiskResult {
     const done = this.results.get(id);
     if (done) return done;
@@ -207,15 +328,19 @@ export class RiskEngine {
     criticality = clamp(criticality, 1, 10);
     const finalStatus: EffectiveStatus = status ?? "UNKNOWN";
     const { score, gap } = moscaScore(criticality, exposure, this.cfg.statusWeight[finalStatus], retention, migration, this.cfg);
-    const res: RiskResult = { id, score: round(score), status: finalStatus, criticality, exposure, retentionYears: retention, migrationYears: migration, moscaGapYears: gap, drivers };
+    const tnfl = this.tnfl(id, criticality, exposure, migration);
+    const hndl = round(score);
+    const combinedScore = Math.max(hndl, tnfl.score);
+    const primaryThreat = combinedScore <= 0 ? "none" : tnfl.score > hndl ? "TNFL" : "HNDL";
+    const res: RiskResult = { id, score: hndl, status: finalStatus, criticality, exposure, retentionYears: retention, migrationYears: migration, moscaGapYears: gap, drivers, tnfl, combinedScore, primaryThreat };
     this.results.set(id, res);
     return res;
   }
 
-  /** Score every non-primitive vertex (primitives are inputs, not assets). Sorted by score desc, then id. */
+  /** Score every non-primitive vertex (primitives are inputs, not assets). Sorted by max(HNDL, TNFL) desc, then id. */
   run(): RiskResult[] {
     for (const v of this.g.allVertices()) if (v.kind !== "CryptoPrimitive") this.score(v.id);
-    return [...this.results.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    return [...this.results.values()].sort((a, b) => b.combinedScore - a.combinedScore || b.score - a.score || a.id.localeCompare(b.id));
   }
 }
 

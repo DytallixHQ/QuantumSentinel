@@ -81,3 +81,79 @@ test("DEPENDS_ON cycles terminate", () => {
   g.addEdge("b", "DEPENDS_ON", "a");
   assert.equal(scoreGraph(g, cfg).length, 2);
 });
+
+// ---------------------------------------------------------------- Trust now, forge later
+
+import type { CryptoMaterial } from "../../core/graph/types.ts";
+
+function cert(g: CryptoGraph, id: string, keyAlg: { name: string; curve?: string; keySize?: number; usage: string }, sigAlg: string, notAfter: string, selfSigned = false): string {
+  g.addVertex<CryptoMaterial>({ id, kind: "CryptoMaterial", label: id, materialType: "certificate", subject: `CN=${id}`, issuer: selfSigned ? `CN=${id}` : "CN=root", notAfter, evidence: ev });
+  g.addEdge(id, "ENCRYPTED_WITH", addAlgorithm(g, keyAlg, ev));
+  g.addEdge(addAlgorithm(g, { name: sigAlg, usage: "signature" }, ev), "SIGNS", id);
+  return id;
+}
+
+function hybridEndpointWithChain(rootKey: string, rootSig: string, leafKey: string, leafSig: string) {
+  const g = new CryptoGraph();
+  g.addVertex(ep("web", "TLS", "external"));
+  g.addEdge("web", "ENCRYPTED_WITH", addAlgorithm(g, { name: "X25519MLKEM768", usage: "key-exchange" }, ev));
+  g.addEdge("web", "ENCRYPTED_WITH", addAlgorithm(g, { name: "AES-256-GCM", usage: "encryption" }, ev));
+  const root = cert(g, "root", { name: rootKey, keySize: 4096, usage: "public-key" }, rootSig, "2040-01-01T00:00:00Z", true);
+  const leaf = cert(g, "leaf", { name: leafKey, curve: "P-256", usage: "signature" }, leafSig, "2026-04-01T00:00:00Z");
+  g.addEdge("root", "SIGNS", leaf);
+  g.addEdge("web", "CONTAINS_KEY", leaf);
+  g.addEdge("web", "CONTAINS_KEY", root);
+  return g;
+}
+
+test("TNFL: hybrid key exchange (HNDL 0) but a classical root trusted past Q-Day is a forgery risk", () => {
+  const r = new Map(scoreGraph(hybridEndpointWithChain("RSA", "SHA256withRSA", "ECDSA", "SHA256withRSA"), cfg).map((x) => [x.id, x]));
+  const web = r.get("web")!;
+  assert.equal(web.score, 0, "HNDL is covered by hybrid key exchange");
+  assert.equal(web.tnfl.status, "VULNERABLE_SHOR");
+  assert.equal(web.tnfl.trustYears, 14, "root valid until 2040");
+  assert.equal(web.tnfl.score, 5 * 1 * 1 * (14 + 3 - 7));
+  assert.equal(web.primaryThreat, "TNFL");
+  assert.equal(web.combinedScore, web.tnfl.score);
+  assert.ok(web.tnfl.drivers.some((d) => /trust anchor/.test(d)));
+  // The root certificate itself is ranked, with the exposure of the endpoint that presents it.
+  assert.equal(r.get("root")!.tnfl.score, 5 * 1 * 1 * 10);
+  assert.equal(r.get("leaf")!.tnfl.score, 0, "a leaf expiring in months is not a TNFL risk on its own");
+});
+
+test("TNFL: an ML-DSA chain is not forgeable", () => {
+  const r = new Map(scoreGraph(hybridEndpointWithChain("ML-DSA-87", "ML-DSA-87", "ML-DSA-65", "ML-DSA-87"), cfg).map((x) => [x.id, x]));
+  assert.equal(r.get("web")!.tnfl.status, "SAFE_PQC");
+  assert.equal(r.get("web")!.tnfl.score, 0);
+  assert.equal(r.get("web")!.primaryThreat, "none");
+});
+
+test("TNFL: signing keys without a validity period use trustYears (KMS, code signing, SSH host keys)", () => {
+  const g = new CryptoGraph();
+  g.addVertex<ServiceGroup>({ id: "cloud:aws-kms", kind: "ServiceGroup", label: "aws-kms", evidence: ev });
+  g.addVertex<CryptoMaterial>({ id: "kms:release-signer", kind: "CryptoMaterial", label: "release signer", materialType: "key-metadata", trustYears: 15, evidence: ev });
+  g.addEdge("kms:release-signer", "ENCRYPTED_WITH", addAlgorithm(g, { name: "RSA", keySize: 3072, usage: "signature" }, ev));
+  g.addEdge("cloud:aws-kms", "CONTAINS_KEY", "kms:release-signer");
+  g.addVertex<CryptoMaterial>({ id: "kms:data", kind: "CryptoMaterial", label: "data key", materialType: "key-metadata", trustYears: 15, evidence: ev });
+  g.addEdge("kms:data", "ENCRYPTED_WITH", addAlgorithm(g, { name: "AES-256-GCM", usage: "encryption" }, ev));
+  g.addVertex({ id: "code:sign.js:3", kind: "CodeAsset", label: "sign.js:3", repoUrl: "r", filePath: "sign.js", line: 3, evidence: ev });
+  g.addEdge("code:sign.js:3", "DEPENDS_ON", addAlgorithm(g, { name: "ECDSA", curve: "P-256", usage: "signature" }, ev));
+  g.addVertex(ep("bastion", "SSH", "internal"));
+  g.addEdge("bastion", "ENCRYPTED_WITH", addAlgorithm(g, { name: "ssh-ed25519", usage: "signature" }, ev));
+  const r = new Map(scoreGraph(g, resolveRiskConfig({ qDayYear: 2033, currentYear: 2026, defaults: { trustYears: 10 } })).map((x) => [x.id, x]));
+  assert.equal(r.get("kms:release-signer")!.tnfl.trustYears, 15);
+  assert.ok(r.get("kms:release-signer")!.tnfl.score > 0);
+  assert.equal(r.get("kms:data")!.tnfl.status, undefined, "symmetric keys have no forgery risk");
+  assert.equal(r.get("cloud:aws-kms")!.tnfl.status, "VULNERABLE_SHOR", "provider group inherits its signing keys");
+  assert.equal(r.get("code:sign.js:3")!.tnfl.trustYears, 10);
+  assert.equal(r.get("code:sign.js:3")!.primaryThreat, "TNFL");
+  assert.equal(r.get("bastion")!.tnfl.status, "VULNERABLE_SHOR");
+  assert.equal(r.get("bastion")!.tnfl.score, 5 * 0.3 * 1 * (10 + 3 - 7));
+});
+
+test("ranking uses max(HNDL, TNFL)", () => {
+  const g = hybridEndpointWithChain("RSA", "SHA256withRSA", "ECDSA", "SHA256withRSA");
+  g.addVertex(ep("legacy", "TCP", "internal"));
+  const ranked = scoreGraph(g, cfg);
+  for (let i = 1; i < ranked.length; i++) assert.ok(ranked[i - 1].combinedScore >= ranked[i].combinedScore);
+});

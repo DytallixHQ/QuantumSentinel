@@ -155,8 +155,8 @@ function publicKeyFactor(certificate = {}) {
   }
   if (/RSA|ECDSA|ECDH|EC-|X25519|X448|P-?256|P-?384|P-?521|prime256v1/i.test(algorithm)) {
     return factor("public-key", "Website identity", 0, 30, "risk", algorithm,
-      "The certificate uses a classical identity key. A future quantum computer could recover that key and impersonate the website.",
-      "Record the certificate provider, renewal owner, and migration trigger. Replace the identity algorithm when browsers and certificate authorities support an approved post-quantum option.");
+      "The certificate uses a classical identity key. This is a trust-now, forge-later risk: once a quantum computer can recover the key, or the key of a certificate authority in the chain, an attacker could forge signatures and impersonate the website.",
+      "Record the certificate provider, renewal owner, and migration trigger. Note which certificate authority roots the chain relies on and how long they stay trusted. Replace the identity algorithm when browsers and certificate authorities support an approved post-quantum option.");
   }
   return factor("public-key", "Website identity", 0, 30, "review", algorithm,
     "The scanner could not identify the certificate identity algorithm.",

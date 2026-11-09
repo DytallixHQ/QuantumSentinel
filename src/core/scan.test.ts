@@ -118,6 +118,11 @@ test("end-to-end graph scan: dedup across modalities, propagation, valid Cyclone
   assert.equal(risk.get("payments")!.score, 10 * 1 * 1 * (10 + 3 - 7));
   assert.equal(risk.get("edge")!.status, "HYBRID");
   assert.equal(risk.get("edge")!.score, 0);
+  // Hybrid key exchange closes HNDL, but the chain's classical RSA root stays trusted past Q-Day: TNFL.
+  assert.equal(risk.get("edge")!.tnfl.status, "VULNERABLE_SHOR");
+  assert.ok(risk.get("edge")!.tnfl.score > 0);
+  assert.equal(risk.get("edge")!.primaryThreat, "TNFL");
+  assert.equal(risk.get("vpn")!.tnfl.score, 0, "no signature evidence observed for the VPN");
   const edge = g.get("edge") as NetworkEndpoint;
   assert.deepEqual(edge.supportedGroups, ["X25519MLKEM768", "x25519"]);
   assert.equal(edge.classicalFallback, true);
@@ -193,14 +198,16 @@ test("CLI: scan --graph --targets --export-cbom", async () => {
     assert.equal(code, 0);
     const text = out.join("");
     assert.match(text, /CBOM \(CycloneDX 1\.7\)/);
-    assert.match(text, /Top Mosca\/HNDL risk \(assets[^\n]*\n\s+60\.0\s+VULNERABLE_SHOR\s+payments/);
-    assert.ok(!/cert:/.test(text), "certificates are not listed in the asset summary");
+    assert.match(text, /Top risk \(assets; HNDL = harvest now, decrypt later; TNFL = trust now, forge later\):\n\s+HNDL\s+TNFL[^\n]*\n\s+60\.0\s+\d+\.\d\s+VULNERABLE_SHOR\s+payments/);
+    assert.match(text, /Signatures trusted past Q-Day[^\n]*\n\s+\d+\.\d\s+trusted [\d.]+ y\s+CN=QS Test Root CA/);
+    assert.ok(!/^\s+[\d.]+\s+[\d.]+\s+\S+\s+cert:/m.test(text), "certificates are not listed in the asset table");
     const cbom = JSON.parse(await readFile(path.join(dir, "out/cbom.json"), "utf8"));
     assert.equal(cbom.specVersion, "1.7");
     assert.ok((await validator())(cbom));
     const html = await readFile(path.join(dir, "report.html"), "utf8");
     assert.match(html, /Fixture Corp/);
     assert.match(html, /Migration plan/);
+    assert.match(html, /<h2>Trust now, forge later<\/h2>[\s\S]*Trust anchor \(root\)/);
     assert.ok(!html.includes("-----BEGIN"));
     const graph = JSON.parse(await readFile(path.join(dir, "graph.json"), "utf8"));
     assert.ok(graph.vertices.length > 10 && graph.risk.length > 0);
