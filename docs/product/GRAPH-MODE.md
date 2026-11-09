@@ -104,6 +104,18 @@ TNFL(v) = C(v) · E(v) · V(v) · max(0, (T_trust     + T_migration) − (T_QDay
   `score` keeps the point estimate `qDayYear`, so existing rankings do not
   change. Without a distribution, `probability` is 1 or 0 and
   `exposureYears` is the hinge `max(0, gap)`.
+- Migration priority answers "which asset should be migrated first?". A
+  candidate is an asset with weak cryptography of its own, ranked by baseline
+  score, at most 50. For each one, the graph is scored again as if that
+  asset's own cryptography (key exchange, and the keys and certificates it
+  holds) were post-quantum. The total drop in `combinedScore` across all
+  assets is its `reduction`.
+  - Service groups and certificates are left out of the sum because they
+    repeat their members' scores.
+  - A terminator in front of many stores therefore ranks above each store.
+  - The ranking appears in the terminal summary ("Migrate first"), in
+    `--output` as `priorities`, and as a "Migrate first" section in the HTML
+    report.
 - The CBOM records both scores as `quantumsentinel:risk.*` and
   `quantumsentinel:risk.tnfl.*` properties, including `probability`,
   `exposureYears` (HNDL) and `normalizedScore`.

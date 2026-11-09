@@ -71,7 +71,7 @@ export async function runGraphCli(argv: string[], deps: GraphScanDeps & { stdout
   if (a.timeoutMs) cfg.timeoutMs = a.timeoutMs;
   if (a.qDay) cfg.risk = { ...cfg.risk, qDayYear: a.qDay };
   const res = await runGraphScan(cfg, baseDir, deps);
-  const graphJson = { ...res.graph.toJSON(), risk: res.risk, errors: res.errors };
+  const graphJson = { ...res.graph.toJSON(), risk: res.risk, priorities: res.priorities, errors: res.errors };
   if (a.cbom) {
     const out = await write(a.cbom, buildCycloneDxCbom(res.graph, { risk: res.risk, toolVersion: deps.version }));
     if (!a.json) print(`CBOM (CycloneDX 1.7): ${out}\n`);
@@ -79,7 +79,7 @@ export async function runGraphCli(argv: string[], deps: GraphScanDeps & { stdout
   if (a.html) {
     const out = path.resolve(a.html);
     await mkdir(path.dirname(out), { recursive: true });
-    await writeFile(out, buildHtmlReport(res.graph, { risk: res.risk, riskConfig: res.riskConfig, client: a.client, errors: res.errors }));
+    await writeFile(out, buildHtmlReport(res.graph, { risk: res.risk, riskConfig: res.riskConfig, client: a.client, errors: res.errors, priorities: res.priorities }));
     if (!a.json) print(`HTML report: ${out}\n`);
   }
   if (a.output) {
@@ -102,6 +102,10 @@ export async function runGraphCli(argv: string[], deps: GraphScanDeps & { stdout
       .map((r) => `  ${r.score.toFixed(1).padStart(5)}  ${r.tnfl.score.toFixed(1).padStart(6)}  ${(r.primaryThreat === "TNFL" ? r.tnfl.status ?? "" : r.status).padEnd(16)}  ${r.id}`),
   ];
   if (!res.risk.some((r) => r.combinedScore > 0 && res.graph.get(r.id)?.kind !== "CryptoMaterial")) lines.push("  (no asset exceeds the Mosca threshold)");
+  if (res.priorities.length) {
+    lines.push("", "Migrate first (total risk removed by migrating this asset's own cryptography):", "  removed  assets  asset");
+    for (const p of res.priorities.slice(0, 5)) lines.push(`  ${p.reduction.toFixed(1).padStart(7)}  ${String(p.assetsImproved).padStart(6)}  ${p.id}`);
+  }
   const forgeable = res.risk.filter((r) => r.tnfl.score > 0 && res.graph.get(r.id)?.kind === "CryptoMaterial").sort((a, b) => b.tnfl.score - a.tnfl.score).slice(0, 5);
   if (forgeable.length) {
     lines.push("", "Signatures trusted past Q-Day (certificates and signing keys):");

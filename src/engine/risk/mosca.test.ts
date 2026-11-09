@@ -4,6 +4,7 @@ import { addAlgorithm } from "../../core/graph/builders.ts";
 import { CryptoGraph } from "../../core/graph/graph.ts";
 import type { NetworkEndpoint, ServiceGroup } from "../../core/graph/types.ts";
 import { moscaScore, moscaUncertain, resolveRiskConfig, scoreGraph } from "./mosca.ts";
+import { migrationPriorities } from "./priority.ts";
 
 const cfg = resolveRiskConfig({ qDayYear: 2033, currentYear: 2026, asOf: "2026-01-01T00:00:00Z" });
 const ev = [{ source: "config" as const, locator: "test", observedAt: "2026-01-01T00:00:00Z" }];
@@ -224,4 +225,29 @@ test("uncertain Q-Day: score keeps the point estimate; normalizedScore is in [0,
   assert.equal(b.get("db")!.probability, 0.5);
   assert.equal(b.get("db")!.exposureYears, 0.5 * 9);
   assert.equal(b.get("db")!.normalizedScore, 0.9 * 1 * 1 * 0.5);
+});
+
+test("migration priority: the shared terminator outranks the assets behind it", () => {
+  const g = new CryptoGraph();
+  g.addVertex(ep("proxy", "TLS", "external", { criticality: 4 }));
+  g.addEdge("proxy", "ENCRYPTED_WITH", addAlgorithm(g, { name: "X25519", usage: "key-exchange" }, ev));
+  g.addEdge("proxy", "ENCRYPTED_WITH", addAlgorithm(g, { name: "AES-256-GCM", usage: "encryption" }, ev));
+  for (const id of ["db1", "db2", "db3"]) {
+    g.addVertex(ep(id, "TCP", "internal", { criticality: 9, retentionYears: 10, migrationYears: 3 }));
+    g.addEdge(id, "TERMINATES_AT", "proxy");
+  }
+  g.addVertex(ep("legacy", "TLS", "internal", { criticality: 2 }));
+  g.addEdge("legacy", "ENCRYPTED_WITH", addAlgorithm(g, { name: "ECDH", usage: "key-exchange" }, ev));
+  const base = new Map(scoreGraph(g, cfg).map((r) => [r.id, r.combinedScore]));
+  const p = migrationPriorities(g, cfg);
+  assert.equal(p[0].id, "proxy");
+  assert.equal(p[0].assetsImproved, 4, "the proxy and the three stores behind it");
+  assert.equal(p[0].reduction, ["proxy", "db1", "db2", "db3"].reduce((s, id) => s + base.get(id)!, 0));
+  assert.ok(!p.some((x) => x.id.startsWith("db")), "stores have no cryptography of their own to migrate");
+  const legacy = p.find((x) => x.id === "legacy");
+  assert.ok(legacy && legacy.reduction === base.get("legacy") && legacy.assetsImproved === 1);
+});
+
+test("migration priority: a clean graph has nothing to migrate", () => {
+  assert.deepEqual(migrationPriorities(propagationGraph("X25519MLKEM768"), cfg), []);
 });

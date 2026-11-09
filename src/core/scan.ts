@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { buildCycloneDxCbom } from "../exporters/cyclonedx.ts";
 import { resolveRiskConfig, scoreGraph, type RiskConfig, type RiskResult } from "../engine/risk/mosca.ts";
+import { migrationPriorities, type MigrationPriority } from "../engine/risk/priority.ts";
 import { ingestCloudKeys, listAwsKmsKeys, listAzureKeys, listGcpKmsKeys, listVaultTransitKeys, type AwsKmsLike, type AzureKeyClientLike, type CloudKeyRecord, type FetchLike } from "../scanners/cloud/index.ts";
 import { scanCode, type CodeTarget } from "../scanners/code/index.ts";
 import { scanFilesystem, type FilesystemTarget } from "../scanners/filesystem/index.ts";
@@ -72,6 +73,8 @@ export interface GraphScanDeps {
 export interface GraphScanResult {
   graph: CryptoGraph;
   risk: RiskResult[];
+  /** Which asset to migrate first: total risk removed by migrating each candidate's own cryptography. */
+  priorities: MigrationPriority[];
   riskConfig: RiskConfig;
   errors: ProbeError[];
 }
@@ -171,7 +174,8 @@ export async function runGraphScan(cfg: TargetsConfig, baseDir = process.cwd(), 
 
   const riskConfig = resolveRiskConfig(cfg.risk);
   const risk = scoreGraph(g, riskConfig);
-  return { graph: g, risk, riskConfig, errors };
+  const priorities = migrationPriorities(g, riskConfig, { baseline: risk });
+  return { graph: g, risk, priorities, riskConfig, errors };
 }
 
 export { buildCycloneDxCbom };

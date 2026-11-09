@@ -3,6 +3,7 @@
 import type { CryptoGraph } from "../core/graph/graph.ts";
 import type { CryptoMaterial, CryptoPrimitive, NetworkEndpoint, Vertex } from "../core/graph/types.ts";
 import type { EffectiveStatus, RiskConfig, RiskResult } from "../engine/risk/mosca.ts";
+import type { MigrationPriority } from "../engine/risk/priority.ts";
 
 export interface HtmlReportOptions {
   risk: RiskResult[];
@@ -11,6 +12,8 @@ export interface HtmlReportOptions {
   client?: string;
   generatedAt?: string;
   errors?: Array<{ target: string; error: string }>;
+  /** Optional migration order (engine/risk/priority.ts); adds a "Migrate first" section. */
+  priorities?: MigrationPriority[];
   /** Optional call to action at the end (hosted scans); omitted from client deliverables. */
   cta?: { heading: string; text: string; url: string; label: string };
 }
@@ -165,6 +168,7 @@ export function buildHtmlReport(g: CryptoGraph, o: HtmlReportOptions): string {
 <div class="notice">Scores use Mosca's inequality against Q-Day (${o.riskConfig.qDayYear}). <strong>Harvest now, decrypt later</strong>: encrypted data recorded today is at risk when its required confidentiality period plus migration time runs past Q-Day. <strong>Trust now, forge later</strong>: signatures, certificates and signing keys are at risk when they must stay trusted past Q-Day, because a quantum computer could then forge them. Risk = criticality × exposure × protection weight × years over the horizon. This assessment reports observed evidence; it is a prioritization aid, not a certification.</div>
 <h2>Priority risks</h2>${ranked.length ? `<table><tr><th>Priority</th><th>Asset</th><th>Main threat</th><th>Protection</th><th>HNDL</th><th>TNFL</th><th>Exposure</th><th>Why</th></tr>${riskRows}</table>` : "<p>None above the threshold.</p>"}
 <h2>Trust now, forge later</h2>${forgeable.length ? `<p class="muted">Certificates, trust anchors, signing keys and the assets that rely on them, where signatures must stay trusted past Q-Day.</p><table><tr><th>Item</th><th>Type</th><th>Signature protection</th><th>Trusted for</th><th>Score</th><th>Why</th></tr>${forgeRows}</table>` : "<p>No signature or certificate needs to stay trusted past the Q-Day horizon.</p>"}
+${o.priorities?.length ? `<h2>Migrate first</h2><p class="muted">Total risk removed if only this asset's own cryptography (key exchange, keys and certificates it holds) moves to post-quantum, across every asset that depends on it.</p><table><tr><th>#</th><th>Asset</th><th>Risk removed</th><th>Assets improved</th></tr>${o.priorities.slice(0, 10).map((p, i) => `<tr><td>${i + 1}</td><td>${esc(p.label)}<br><code>${esc(p.id)}</code></td><td>${p.reduction.toFixed(1)}</td><td>${p.assetsImproved}</td></tr>`).join("")}</table>` : ""}
 <h2>Migration plan</h2>${ranked.length ? `<table><tr><th>#</th><th>Asset</th><th>Priority</th><th>Action</th></tr>${planRows}</table>` : "<p>No actions required at the current horizon. Re-assess when retention requirements or the Q-Day estimate change.</p>"}
 <h2>Network endpoints</h2>${endpoints.length ? `<table><tr><th>Protocol</th><th>Endpoint</th><th>Posture</th><th>Version</th><th>Key exchange in use</th><th>Accepted groups</th><th>Classical fallback</th><th>Protection</th></tr>${endpointRows}</table>` : "<p>No network endpoints in scope.</p>"}
 <h2>Certificates</h2>${certs.length ? `<table><tr><th>Subject</th><th>Issuer</th><th>Key</th><th>Signed with</th><th>Expires</th><th>Seen at</th></tr>${certRows}</table>` : "<p>No certificates observed.</p>"}

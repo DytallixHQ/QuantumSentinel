@@ -72,3 +72,11 @@ test("HTML report call to action is opt-in and https-only", () => {
   assert.ok(!/<script/i.test(html));
   assert.ok(!buildHtmlReport(g, { risk, riskConfig: cfg, cta: { ...cta, url: "javascript:alert(1)" } }).includes('class="cta"'));
 });
+
+test("html report: Migrate first section only when priorities are given", () => {
+  const g = new CryptoGraph();
+  const html = buildHtmlReport(g, { risk: [], riskConfig: cfg, priorities: [{ id: "lb<1>", label: "edge <lb>", reduction: 12.5, assetsImproved: 3, status: "VULNERABLE_SHOR" }] });
+  assert.ok(html.includes("<h2>Migrate first</h2>"));
+  assert.ok(html.includes("12.5") && html.includes("edge &lt;lb&gt;") && !html.includes("edge <lb>"));
+  assert.ok(!buildHtmlReport(g, { risk: [], riskConfig: cfg }).includes("Migrate first"));
+});

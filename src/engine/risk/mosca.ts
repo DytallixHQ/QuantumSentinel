@@ -186,9 +186,13 @@ export class RiskEngine {
     (id, get) => this.scoreLocal(id, get),
   );
 
-  constructor(graph: CryptoGraph, cfg: RiskConfig = DEFAULT_RISK_CONFIG) {
+  /** Counterfactual: these vertices' own cryptography (and held keys/certificates) is treated as migrated to PQC. */
+  private readonly migrated: ReadonlySet<string>;
+
+  constructor(graph: CryptoGraph, cfg: RiskConfig = DEFAULT_RISK_CONFIG, migrated: ReadonlySet<string> = new Set()) {
     this.g = graph;
     this.cfg = cfg;
+    this.migrated = migrated;
   }
 
   private ownExposure(v: Vertex): number {
@@ -200,6 +204,11 @@ export class RiskEngine {
   /** Crypto that directly protects v (own primitives, held material, mounted volumes). */
   private base(id: string): BaseValue {
     return this.baseSolver.get(id);
+  }
+
+  /** Status from the vertex's own cryptography (and mounted volumes), before TERMINATES_AT / DEPENDS_ON. */
+  ownStatus(id: string): EffectiveStatus | undefined {
+    return this.base(id).status;
   }
 
   private baseLocal(id: string, get: (child: string) => BaseValue | undefined): BaseValue {
@@ -227,6 +236,8 @@ export class RiskEngine {
       const conf = [...direct.values()].filter((p) => CONFIDENTIALITY_USAGES.has(p.usage));
       const relevant = conf.length ? conf : [...direct.values(), ...held.values()];
       let status = worstStatus(relevant.map((p) => p.status));
+      const migrated = this.migrated.has(id);
+      if (migrated && status !== undefined) status = "SAFE_PQC";
       const drivers = relevant.filter((p) => p.status === status).map((p) => `${p.algorithm} (${p.usage}): ${p.status}`);
       for (const e of this.g.outgoing(id, ["MOUNTS"])) {
         const m = get(e.to);
@@ -236,6 +247,10 @@ export class RiskEngine {
         }
       }
       if (v.kind === "NetworkEndpoint" && v.classicalFallback) drivers.push("classical fallback accepted alongside PQ key exchange (downgrade exposure for non-PQ clients)");
+      if (migrated && v.kind === "NetworkEndpoint" && (status === undefined || status === "PLAINTEXT")) {
+        status = "SAFE_PQC";
+        drivers.push("counterfactual: migrated to PQC");
+      }
       if (status === undefined && v.kind === "NetworkEndpoint" && v.protocol === "TCP") {
         status = "PLAINTEXT";
         drivers.push("no transport encryption observed");
@@ -338,8 +353,12 @@ export class RiskEngine {
       }
     } else if (v.kind !== "CryptoPrimitive") {
       // Direct authentication primitives (SSH host keys, code-signing references).
-      for (const p of sigPrims(id, ["ENCRYPTED_WITH", "DEPENDS_ON"])) consider(p.status, defaultTrust, `${p.algorithm} ${p.usage === "signature" ? "signatures" : "identity key"}`);
+      const migrated = this.migrated.has(id);
+      const held = new Set(this.g.outgoing(id, ["CONTAINS_KEY"]).map((e) => e.to));
+      if (!migrated)
+        for (const p of sigPrims(id, ["ENCRYPTED_WITH", "DEPENDS_ON"])) consider(p.status, defaultTrust, `${p.algorithm} ${p.usage === "signature" ? "signatures" : "identity key"}`);
       const relatedBases = this.tnflRelated(id)
+        .filter((t) => !(migrated && held.has(t)))
         .map((t) => ({ t, r: get(t) }))
         .filter((x): x is { t: string; r: TnflBase } => x.r !== undefined)
         .sort((a, b) => (b.r.trustYears ?? 0) - (a.r.trustYears ?? 0));
