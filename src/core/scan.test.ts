@@ -212,9 +212,10 @@ test("CLI: scan --graph --targets --export-cbom", async () => {
 });
 
 test("cloud connector failures are reported, not fatal", async () => {
-  const res = await runGraphScan({ cloud: { vault: { address: "https://vault.test.invalid" }, awsKms: { region: "us-east-1" } } }, FIX, {
-    env: {}, aws: async () => { throw new Error("no credentials"); }, now: NOW,
+  const res = await runGraphScan({ cloud: { vault: { address: "https://vault.test.invalid" }, awsKms: { region: "us-east-1" }, gcpKms: { project: "acme" } } }, FIX, {
+    env: {}, aws: async () => { throw new Error("no credentials"); }, gcpToken: async () => { throw new Error("no Google Cloud credentials"); }, now: NOW,
   });
-  assert.equal(res.errors.length, 2);
+  assert.equal(res.errors.length, 3);
+  assert.match(res.errors.map((e) => e.error).join(), /Google Cloud/);
   assert.match(res.errors.map((e) => e.error).join(), /VAULT_TOKEN/);
 });

@@ -32,8 +32,13 @@ See [`docs/examples/graph-targets.json`](../examples/graph-targets.json).
   declared only and never probed; it models a plaintext internal service.
 - `filesystem[]`, `code[]`: paths are relative to the targets file.
 - `cloud`: `awsKms` (needs `@aws-sdk/client-kms`), `azureKeyVault` (needs
-  `@azure/keyvault-keys` and `@azure/identity`), and `vault` (HashiCorp
-  Transit, with the token taken from `$VAULT_TOKEN`). Install the SDKs only if
+  `@azure/keyvault-keys` and `@azure/identity`), `gcpKms` (Google Cloud KMS),
+  and `vault` (HashiCorp Transit, with the token taken from `$VAULT_TOKEN`).
+  `gcpKms` takes `{ "project": "...", "locations": [...] }`; if `locations`
+  is omitted, every location in the project is scanned. It needs no SDK: the
+  token comes from `$QS_GCP_ACCESS_TOKEN` or, failing that,
+  `gcloud auth print-access-token`. The `roles/cloudkms.viewer` role is
+  enough. Install the SDKs only if
   you use them. The connectors call only list and describe/read-metadata
   operations.
 - `groups[]`: clusters or applications. Each group gets a `DEPENDS_ON` edge to

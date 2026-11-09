@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { buildCycloneDxCbom } from "../exporters/cyclonedx.ts";
 import { resolveRiskConfig, scoreGraph, type RiskConfig, type RiskResult } from "../engine/risk/mosca.ts";
-import { ingestCloudKeys, listAwsKmsKeys, listAzureKeys, listVaultTransitKeys, type AwsKmsLike, type AzureKeyClientLike, type CloudKeyRecord, type FetchLike } from "../scanners/cloud/index.ts";
+import { ingestCloudKeys, listAwsKmsKeys, listAzureKeys, listGcpKmsKeys, listVaultTransitKeys, type AwsKmsLike, type AzureKeyClientLike, type CloudKeyRecord, type FetchLike } from "../scanners/cloud/index.ts";
 import { scanCode, type CodeTarget } from "../scanners/code/index.ts";
 import { scanFilesystem, type FilesystemTarget } from "../scanners/filesystem/index.ts";
 import { scanNetwork, type NetworkProbes, type NetworkTarget, type ProbeError } from "../scanners/network/index.ts";
@@ -19,6 +19,7 @@ export interface TargetsConfig {
     awsKms?: { region: string; maxKeys?: number };
     azureKeyVault?: { vaultUrl: string; maxKeys?: number };
     vault?: { address: string; mount?: string; namespace?: string; tokenEnv?: string; maxKeys?: number };
+    gcpKms?: { project: string; locations?: string[]; tokenEnv?: string; maxKeys?: number };
   };
   groups?: Array<RiskInputs & { id: string; label?: string; description?: string; members: string[] }>;
   relations?: Array<{ from: string; type: EdgeType; to: string }>;
@@ -61,6 +62,8 @@ export interface GraphScanDeps {
   aws?: (region: string) => Promise<AwsKmsLike>;
   azure?: (vaultUrl: string) => Promise<AzureKeyClientLike>;
   fetch?: FetchLike;
+  /** Returns a Google OAuth access token; default: $QS_GCP_ACCESS_TOKEN, else `gcloud auth print-access-token`. */
+  gcpToken?: () => Promise<string>;
   env?: Record<string, string | undefined>;
   now?: () => string;
   repoScanner?: Parameters<typeof scanCode>[1] extends infer O ? (O extends { scanner?: infer S } ? S : never) : never;
@@ -78,6 +81,19 @@ async function importOptional(name: string): Promise<Record<string, unknown>> {
     return (await import(name)) as Record<string, unknown>;
   } catch {
     throw new Error(`optional dependency '${name}' is not installed; run: npm install ${name}`);
+  }
+}
+
+async function gcloudToken(): Promise<string> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  try {
+    const { stdout } = await promisify(execFile)("gcloud", ["auth", "print-access-token"], { timeout: 15_000 });
+    const token = stdout.trim();
+    if (!token) throw new Error("empty token");
+    return token;
+  } catch {
+    throw new Error("no Google Cloud credentials: run `gcloud auth login`, or set $QS_GCP_ACCESS_TOKEN");
   }
 }
 
@@ -129,6 +145,13 @@ export async function runGraphScan(cfg: TargetsConfig, baseDir = process.cwd(), 
       const token = env[v.tokenEnv ?? "VAULT_TOKEN"];
       if (!token) throw new Error(`Vault token not set in $${v.tokenEnv ?? "VAULT_TOKEN"}`);
       return listVaultTransitKeys({ address: v.address, token, mount: v.mount, namespace: v.namespace, fetch: deps.fetch, maxKeys: v.maxKeys });
+    });
+  }
+  if (cloud.gcpKms) {
+    const c = cloud.gcpKms;
+    await guard(`gcp-kms:${c.project}`, async () => {
+      const token = deps.gcpToken ? await deps.gcpToken() : env[c.tokenEnv ?? "QS_GCP_ACCESS_TOKEN"] ?? (await gcloudToken());
+      return listGcpKmsKeys({ project: c.project, locations: c.locations, token, fetch: deps.fetch, maxKeys: c.maxKeys });
     });
   }
   if (keys.length) g.merge(ingestCloudKeys(keys, { now: now() }));

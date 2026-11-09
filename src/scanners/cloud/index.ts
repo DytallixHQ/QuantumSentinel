@@ -8,7 +8,7 @@ import { classifyAlgorithm, type Classification } from "../../engine/classifier/
 import { AWS_KMS_KEY_SPECS } from "../../engine/classifier/registry.ts";
 
 export interface CloudKeyRecord {
-  provider: "aws-kms" | "azure-key-vault" | "hashicorp-vault";
+  provider: "aws-kms" | "azure-key-vault" | "hashicorp-vault" | "gcp-kms";
   keyId: string; // ARN / key URL / mount+name
   name: string;
   classification: Classification;
@@ -131,6 +131,96 @@ export async function listVaultTransitKeys(opts: { address: string; token: strin
       operations: [d.supports_encryption ? "encrypt" : "", d.supports_signing ? "sign" : "", d.exportable ? "exportable" : ""].filter(Boolean),
       state: "active",
     });
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ Google Cloud KMS
+
+/**
+ * Map a Cloud KMS CryptoKeyVersionAlgorithm to the classifier.
+ * https://cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions#CryptoKeyVersionAlgorithm
+ */
+export function gcpAlgorithm(alg: string): { name: string; keySize?: number; curve?: string; usage: string } {
+  const a = alg.toUpperCase();
+  if (a === "GOOGLE_SYMMETRIC_ENCRYPTION") return { name: "AES-256-GCM", usage: "encryption" };
+  if (a === "EXTERNAL_SYMMETRIC_ENCRYPTION") return { name: "external-symmetric", usage: "encryption" };
+  let m = a.match(/^AES_(128|256)_(GCM|CBC|CTR)$/);
+  if (m) return { name: `AES-${m[1]}-${m[2]}`, usage: "encryption" };
+  m = a.match(/^RSA_(SIGN|DECRYPT)_[A-Z0-9_]*?(2048|3072|4096)/);
+  if (m) return { name: m[1] === "SIGN" && a.includes("PSS") ? "RSASSA-PSS" : "RSA", keySize: Number(m[2]), usage: m[1] === "SIGN" ? "signature" : "encryption" };
+  m = a.match(/^EC_SIGN_(P256|P384|SECP256K1)_/);
+  if (m) return { name: "EC", curve: ({ P256: "P-256", P384: "P-384", SECP256K1: "secp256k1" } as Record<string, string>)[m[1]], usage: "signature" };
+  if (a === "EC_SIGN_ED25519") return { name: "Ed25519", usage: "signature" };
+  m = a.match(/^HMAC_(SHA1|SHA224|SHA256|SHA384|SHA512)$/);
+  if (m) return { name: `HMAC-${m[1].replace("SHA", "SHA-")}`, usage: "mac" };
+  m = a.match(/^PQ_SIGN_ML_DSA_(44|65|87)/);
+  if (m) return { name: `ML-DSA-${m[1]}`, usage: "signature" };
+  m = a.match(/SLH_DSA_(SHA2|SHAKE)_(128|192|256)([SF])/);
+  if (m) return { name: `SLH-DSA-${m[1]}-${m[2]}${m[3].toLowerCase()}`, usage: "signature" };
+  m = a.match(/^ML_KEM_(512|768|1024)$/);
+  if (m) return { name: `ML-KEM-${m[1]}`, usage: "key-exchange" };
+  if (a === "KEM_XWING") return { name: "X-Wing (X25519+ML-KEM-768)", usage: "key-exchange" };
+  return { name: alg, usage: "unknown" };
+}
+
+const GCP_STATE: Record<string, CryptoMaterial["keyState"]> = {
+  ENABLED: "active", DISABLED: "suspended", DESTROYED: "destroyed", DESTROY_SCHEDULED: "deactivated",
+  PENDING_GENERATION: "pre-activation", PENDING_IMPORT: "pre-activation", PENDING_EXTERNAL_DESTRUCTION: "deactivated",
+};
+
+interface GcpCryptoKey {
+  name: string;
+  purpose?: string;
+  createTime?: string;
+  primary?: { state?: string; algorithm?: string; protectionLevel?: string };
+  versionTemplate?: { algorithm?: string; protectionLevel?: string };
+}
+
+/**
+ * Lists key rings and crypto keys with GET calls only (role roles/cloudkms.viewer is enough).
+ * Never calls versions, getPublicKey, or any crypto operation. Locations default to all
+ * locations the project reports.
+ */
+export async function listGcpKmsKeys(opts: { project: string; token: string; locations?: string[]; fetch?: FetchLike; maxKeys?: number }): Promise<CloudKeyRecord[]> {
+  const f = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
+  const base = "https://cloudkms.googleapis.com/v1";
+  const headers = { Authorization: `Bearer ${opts.token}` };
+  const max = opts.maxKeys ?? 1000;
+  const getAll = async <T>(url: string, field: string): Promise<T[]> => {
+    const out: T[] = [];
+    let page: string | undefined;
+    do {
+      const r = await f(`${url}${url.includes("?") ? "&" : "?"}pageSize=1000${page ? `&pageToken=${encodeURIComponent(page)}` : ""}`, { method: "GET", headers });
+      if (!r.ok) throw new Error(`GCP KMS GET ${url.replace(base, "")} failed: HTTP ${r.status}`);
+      const body = (await r.json()) as Record<string, unknown>;
+      out.push(...((body[field] as T[] | undefined) ?? []));
+      page = body.nextPageToken as string | undefined;
+    } while (page && out.length < max);
+    return out;
+  };
+  const project = encodeURIComponent(opts.project);
+  const locations = opts.locations ?? (await getAll<{ locationId: string }>(`${base}/projects/${project}/locations`, "locations")).map((l) => l.locationId);
+  const out: CloudKeyRecord[] = [];
+  for (const loc of locations) {
+    if (out.length >= max) break;
+    const rings = await getAll<{ name: string }>(`${base}/projects/${project}/locations/${encodeURIComponent(loc)}/keyRings`, "keyRings");
+    for (const ring of rings) {
+      for (const k of await getAll<GcpCryptoKey>(`${base}/${ring.name}/cryptoKeys`, "cryptoKeys")) {
+        if (out.length >= max) break;
+        const alg = k.primary?.algorithm ?? k.versionTemplate?.algorithm ?? "UNKNOWN";
+        const entry = gcpAlgorithm(alg);
+        out.push({
+          provider: "gcp-kms",
+          keyId: k.name,
+          name: k.name.split("/").pop() ?? k.name,
+          classification: classifyAlgorithm(entry),
+          operations: [k.purpose, k.primary?.protectionLevel ?? k.versionTemplate?.protectionLevel].filter((x): x is string => Boolean(x)),
+          state: k.primary?.state ? GCP_STATE[k.primary.state] : undefined,
+          createdAt: k.createTime,
+        });
+      }
+    }
   }
   return out;
 }
