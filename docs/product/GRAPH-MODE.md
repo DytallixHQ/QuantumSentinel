@@ -45,27 +45,51 @@ See [`docs/examples/graph-targets.json`](../examples/graph-targets.json).
   every member.
 - `relations[]`: extra edges such as `{ "from": "db", "type": "TERMINATES_AT", "to": "proxy" }`.
 - Any vertex can set `criticality` (1 to 10), `exposureFactor` (0.1 to 1),
-  `retentionYears`, and `migrationYears`.
+  `retentionYears`, `migrationYears`, and `trustYears`.
 
 ## Risk model
 
+Each asset gets two Mosca scores, and assets are ranked by the higher of the two.
+
 ```
-R(v) = C(v) · E(v) · V(v) · max(0, (T_retention + T_migration) − (T_QDay − T_now))
+HNDL(v) = C(v) · E(v) · V(v) · max(0, (T_retention + T_migration) − (T_QDay − T_now))
+TNFL(v) = C(v) · E(v) · V(v) · max(0, (T_trust     + T_migration) − (T_QDay − T_now))
 ```
 
+- **Harvest now, decrypt later (HNDL)** applies to confidentiality. Encrypted
+  data recorded today is exposed once its key exchange or encryption can be
+  broken. The time input is how long the data must stay confidential
+  (`retentionYears`).
+- **Trust now, forge later (TNFL)** applies to signatures and identity. Once
+  Shor's algorithm is practical, RSA, ECDSA, EdDSA and DSA signatures can be
+  forged. That exposes certificates, trust anchors, code- and
+  firmware-signing keys, signed documents, KMS signing keys and SSH host
+  keys. The time input is how long the signature or key must stay trusted
+  (`trustYears`):
+  - For a certificate, `trustYears` is its remaining validity, so long-lived
+    root CAs dominate.
+  - For a signing key with no validity period, it is `trustYears`
+    (default 5).
+  - Endpoints, files, groups and cloud key stores take the worst of the
+    certificates and keys they hold or present.
+  - Certificates and keys take the criticality and exposure of the assets
+    that present them.
 - `T_QDay` is a calendar year (default 2033) and is converted to years
-  remaining. Subtracting the raw year would make every score zero.
-- `V(v)` weights the effective protection: plaintext and Shor-vulnerable 1,
-  unknown 0.5, Grover-degraded 0.25, hybrid and PQC 0. Without it, a service
-  on ML-KEM would score the same as one on RSA. You can override the weights
-  under `risk.statusWeight`.
-- HNDL status comes from the key-exchange and encryption primitives applied
-  directly to the asset. A certificate's key decides the status only when the
-  asset has no direct crypto, such as a file that holds a key.
-- Through `TERMINATES_AT`, a backend inherits its terminator's status and the
-  higher of the two exposures. Through `DEPENDS_ON`, a group takes the worst
-  member status, the highest exposure, and the longest retention and migration
-  times, combined with its own criticality.
+  remaining.
+- `V(v)` weights the protection: plaintext and Shor-vulnerable 1, unknown
+  0.5, Grover-degraded 0.25, hybrid and PQC 0. Override it under
+  `risk.statusWeight`.
+- HNDL status comes from the key-exchange and encryption primitives that
+  apply directly to the asset.
+- TNFL status comes from signature and identity primitives: certificate
+  keys, issuer signature algorithms, host keys and signing keys.
+- An endpoint with hybrid key exchange but a classical certificate chain
+  scores 0 for HNDL and above 0 for TNFL. That is the expected result.
+- Through `TERMINATES_AT`, a backend inherits its terminator's status,
+  exposure and identity. Through `DEPENDS_ON`, a group takes the worst of its
+  members.
+- The CBOM records both scores as `quantumsentinel:risk.*` and
+  `quantumsentinel:risk.tnfl.*` properties.
 
 ## Scanner notes
 

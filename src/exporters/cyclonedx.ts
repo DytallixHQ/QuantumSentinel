@@ -185,7 +185,7 @@ export function buildCycloneDxCbom(g: CryptoGraph, opts: CbomOptions = {}): Json
     const props = [
       ...((c.properties as Json[] | undefined) ?? []),
       ...edgeProps,
-      ...(r ? compact([prop("risk.score", r.score), prop("risk.status", r.status), prop("risk.exposure", r.exposure), prop("risk.criticality", r.criticality), prop("risk.moscaGapYears", r.moscaGapYears)]) : []),
+      ...(r ? compact([prop("risk.score", r.score), prop("risk.status", r.status), prop("risk.exposure", r.exposure), prop("risk.criticality", r.criticality), prop("risk.moscaGapYears", r.moscaGapYears), prop("risk.tnfl.score", r.tnfl.score), prop("risk.tnfl.status", r.tnfl.status), prop("risk.tnfl.trustYears", r.tnfl.status ? r.tnfl.trustYears : undefined), prop("risk.combinedScore", r.combinedScore), prop("risk.primaryThreat", r.primaryThreat)]) : []),
     ];
     if (props.length) c.properties = props;
     else delete c.properties;

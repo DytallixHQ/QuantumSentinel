@@ -26,8 +26,8 @@ const STATUS_LABEL: Record<EffectiveStatus, string> = {
 const STATUS_ORDER: EffectiveStatus[] = ["PLAINTEXT", "VULNERABLE_SHOR", "UNKNOWN", "DEGRADED_GROVER", "HYBRID", "SAFE_PQC"];
 
 function priority(r: RiskResult, maxScore: number): "Critical" | "High" | "Medium" | "Monitor" {
-  if (r.score <= 0) return "Monitor";
-  const rel = maxScore > 0 ? r.score / maxScore : 0;
+  if (r.combinedScore <= 0) return "Monitor";
+  const rel = maxScore > 0 ? r.combinedScore / maxScore : 0;
   if (r.status === "PLAINTEXT" || (rel >= 0.66 && r.exposure >= 0.7)) return "Critical";
   if (rel >= 0.33) return "High";
   return "Medium";
@@ -61,8 +61,16 @@ export function recommend(g: CryptoGraph, v: Vertex, r: RiskResult): string[] {
   }
   if (v.kind === "FileAsset" && prims.some((p) => p.status === "VULNERABLE_SHOR")) out.push("Re-key stored material and protect at-rest data with AES-256; plan PQC replacement of the public-key layer.");
   if (v.kind === "CodeAsset") out.push("Route this call site through a crypto-agile wrapper and add an ML-KEM / ML-DSA option.");
+  if (r.tnfl.score > 0) {
+    const anchors = g.outgoing(v.id, ["CONTAINS_KEY"]).map((e) => g.get(e.to)).filter((m): m is CryptoMaterial => m?.kind === "CryptoMaterial" && m.materialType === "certificate" && !!m.subject && m.subject === m.issuer);
+    if (v.kind === "NetworkEndpoint" && v.protocol === "TLS") out.push(`Signatures here must stay trusted for ${r.tnfl.trustYears} years, past Q-Day. Plan ML-DSA or composite certificates with your CA${anchors.length ? ", and confirm when the trust anchors (" + anchors.map((a) => a.subject).join("; ") + ") will be replaced" : ""}.`);
+    else if (v.kind === "NetworkEndpoint" && v.protocol === "SSH") out.push("Host-key signatures can be forged after Q-Day. Track post-quantum SSH host-key support, keep host-key rotation automated, and avoid long-lived pinned host keys.");
+    else if (v.kind === "NetworkEndpoint" && v.protocol === "IKEv2") out.push("VPN peer authentication relies on classical signatures. Plan post-quantum (ML-DSA) authentication certificates for the gateway.");
+    else if (v.kind === "CodeAsset") out.push("Signatures from this code path must stay unforgeable. Move signing to ML-DSA or SLH-DSA (LMS/XMSS for firmware, NIST SP 800-208), with a dual-signing transition period.");
+    else if (v.kind === "ServiceGroup" || v.kind === "FileAsset") out.push(`Signing keys and certificates held here stay trusted for ${r.tnfl.trustYears} years, past Q-Day. Re-issue them with ML-DSA or SLH-DSA, starting with the longest-lived.`);
+  }
   if (v.kind === "ServiceGroup") out.push("Coordinate migration across the members listed in the drivers; this group carries their highest exposure.");
-  if (!out.length && r.score > 0) out.push("Review the drivers and confirm the retention and migration assumptions for this asset.");
+  if (!out.length && r.combinedScore > 0) out.push("Review the drivers and confirm the retention and migration assumptions for this asset.");
   return out;
 }
 
@@ -80,8 +88,11 @@ const pill = (cls: string, text: string) => `<span class="pill ${esc(cls)}">${es
 
 export function buildHtmlReport(g: CryptoGraph, o: HtmlReportOptions): string {
   const assets = o.risk.filter((r) => g.get(r.id)?.kind !== "CryptoMaterial");
-  const ranked = assets.filter((r) => r.score > 0);
-  const max = ranked[0]?.score ?? 0;
+  const ranked = assets.filter((r) => r.combinedScore > 0);
+  const max = ranked[0]?.combinedScore ?? 0;
+  const hndlCount = assets.filter((r) => r.score > 0).length;
+  const tnflCount = assets.filter((r) => r.tnfl.score > 0).length;
+  const forgeable = o.risk.filter((r) => r.tnfl.score > 0).sort((a, b) => b.tnfl.score - a.tnfl.score);
   const yearsLeft = o.riskConfig.qDayYear - o.riskConfig.currentYear;
   const prims = g.allVertices("CryptoPrimitive") as CryptoPrimitive[];
   const endpoints = g.allVertices("NetworkEndpoint") as NetworkEndpoint[];
@@ -99,11 +110,21 @@ export function buildHtmlReport(g: CryptoGraph, o: HtmlReportOptions): string {
   const pqEndpoints = endpoints.filter((e) => effectivePrimitives(g, e.id).some((p) => p.usage === "key-exchange" && (p.status === "HYBRID" || p.status === "SAFE_PQC")));
 
   const headline = ranked.length
-    ? `${ranked.length} of ${assets.length} assets have data that must stay confidential past the ${o.riskConfig.qDayYear} Q-Day planning horizon (${yearsLeft} years away) but are protected by cryptography a quantum computer could break or weaken. Critical: ${counts.crit}; high: ${counts.high}.`
-    : `No assessed asset exceeds the Mosca threshold against a ${o.riskConfig.qDayYear} Q-Day horizon.`;
+    ? `${ranked.length} of ${assets.length} assets are at risk before the ${o.riskConfig.qDayYear} Q-Day planning horizon (${yearsLeft} years away). ${hndlCount} hold data that must stay confidential past Q-Day but is protected by breakable or weakened encryption (harvest now, decrypt later). ${tnflCount} rely on signatures that must stay trusted past Q-Day but could then be forged (trust now, forge later). Critical: ${counts.crit}; high: ${counts.high}.`
+    : `No assessed asset exceeds the Mosca threshold against a ${o.riskConfig.qDayYear} Q-Day horizon, for either confidentiality (harvest now, decrypt later) or signatures (trust now, forge later).`;
 
   const label = (id: string) => esc(g.get(id)?.label ?? id);
-  const riskRows = ranked.slice(0, 25).map((r) => `<tr><td>${pill(priority(r, max), priority(r, max))}</td><td>${label(r.id)}<br><code>${esc(r.id)}</code></td><td>${pill(r.status, STATUS_LABEL[r.status])}</td><td>${r.score.toFixed(1)}</td><td>${r.exposure}</td><td>${r.retentionYears} + ${r.migrationYears} y</td><td><ul>${r.drivers.slice(0, 4).map((d) => `<li>${esc(d)}</li>`).join("")}</ul></td></tr>`).join("");
+  const riskRows = ranked.slice(0, 25).map((r) => {
+    const tn = r.primaryThreat === "TNFL";
+    const status = tn ? r.tnfl.status ?? "UNKNOWN" : r.status;
+    const drivers = tn ? r.tnfl.drivers : r.drivers;
+    return `<tr><td>${pill(priority(r, max), priority(r, max))}</td><td>${label(r.id)}<br><code>${esc(r.id)}</code></td><td>${tn ? "Trust now, forge later" : "Harvest now, decrypt later"}</td><td>${pill(status, STATUS_LABEL[status])}</td><td>${r.score.toFixed(1)}</td><td>${r.tnfl.score.toFixed(1)}</td><td>${r.exposure}</td><td><ul>${drivers.slice(0, 4).map((d) => `<li>${esc(d)}</li>`).join("")}</ul></td></tr>`;
+  }).join("");
+  const forgeRows = forgeable.slice(0, 30).map((r) => {
+    const v = g.get(r.id)!;
+    const kind = v.kind === "CryptoMaterial" ? (v.materialType === "certificate" ? (v.subject && v.subject === v.issuer ? "Trust anchor (root)" : "Certificate") : "Signing key") : v.kind === "NetworkEndpoint" ? `${v.protocol} endpoint` : v.kind === "CodeAsset" ? "Code" : v.kind === "ServiceGroup" ? "Group" : "File";
+    return `<tr><td>${label(r.id)}</td><td>${esc(kind)}</td><td>${pill(r.tnfl.status ?? "UNKNOWN", STATUS_LABEL[r.tnfl.status ?? "UNKNOWN"])}</td><td>${r.tnfl.trustYears} y</td><td>${r.tnfl.score.toFixed(1)}</td><td><ul>${r.tnfl.drivers.slice(0, 3).map((d) => `<li>${esc(d)}</li>`).join("")}</ul></td></tr>`;
+  }).join("");
 
   const planRows = ranked.map((r, i) => {
     const v = g.get(r.id)!;
@@ -136,10 +157,11 @@ export function buildHtmlReport(g: CryptoGraph, o: HtmlReportOptions): string {
 <p class="muted">${o.client ? esc(o.client) + " · " : ""}Generated ${esc(o.generatedAt ?? new Date().toISOString())} by QuantumSentinel</p>
 <h2>Executive summary</h2>
 <p>${esc(headline)}</p>
-<div class="cards"><div class="card"><div class="l">Critical</div><div class="n">${counts.crit}</div></div><div class="card"><div class="l">High</div><div class="n">${counts.high}</div></div><div class="card"><div class="l">Endpoints with PQC</div><div class="n">${pqEndpoints.length}/${endpoints.length}</div></div><div class="card"><div class="l">Classical fallback</div><div class="n">${fallback.length}</div></div><div class="card"><div class="l">Certificates</div><div class="n">${certs.length}</div></div><div class="card"><div class="l">Algorithms</div><div class="n">${prims.length}</div></div></div>
+<div class="cards"><div class="card"><div class="l">Critical</div><div class="n">${counts.crit}</div></div><div class="card"><div class="l">High</div><div class="n">${counts.high}</div></div><div class="card"><div class="l">Endpoints with PQC</div><div class="n">${pqEndpoints.length}/${endpoints.length}</div></div><div class="card"><div class="l">Classical fallback</div><div class="n">${fallback.length}</div></div><div class="card"><div class="l">Forgeable signatures</div><div class="n">${forgeable.length}</div></div><div class="card"><div class="l">Certificates</div><div class="n">${certs.length}</div></div><div class="card"><div class="l">Algorithms</div><div class="n">${prims.length}</div></div></div>
 <div class="cards">${statusCards}</div>
-<div class="notice">Scores use Mosca's inequality: an asset is at risk when its data retention plus migration time exceeds the years left before Q-Day (${o.riskConfig.qDayYear}). Risk = criticality × exposure × protection weight × years over the horizon. This assessment reports observed evidence; it is a prioritization aid, not a certification.</div>
-<h2>Priority risks</h2>${ranked.length ? `<table><tr><th>Priority</th><th>Asset</th><th>Protection</th><th>Score</th><th>Exposure</th><th>Retention + migration</th><th>Why</th></tr>${riskRows}</table>` : "<p>None above the threshold.</p>"}
+<div class="notice">Scores use Mosca's inequality against Q-Day (${o.riskConfig.qDayYear}). <strong>Harvest now, decrypt later</strong>: encrypted data recorded today is at risk when its required confidentiality period plus migration time runs past Q-Day. <strong>Trust now, forge later</strong>: signatures, certificates and signing keys are at risk when they must stay trusted past Q-Day, because a quantum computer could then forge them. Risk = criticality × exposure × protection weight × years over the horizon. This assessment reports observed evidence; it is a prioritization aid, not a certification.</div>
+<h2>Priority risks</h2>${ranked.length ? `<table><tr><th>Priority</th><th>Asset</th><th>Main threat</th><th>Protection</th><th>HNDL</th><th>TNFL</th><th>Exposure</th><th>Why</th></tr>${riskRows}</table>` : "<p>None above the threshold.</p>"}
+<h2>Trust now, forge later</h2>${forgeable.length ? `<p class="muted">Certificates, trust anchors, signing keys and the assets that rely on them, where signatures must stay trusted past Q-Day.</p><table><tr><th>Item</th><th>Type</th><th>Signature protection</th><th>Trusted for</th><th>Score</th><th>Why</th></tr>${forgeRows}</table>` : "<p>No signature or certificate needs to stay trusted past the Q-Day horizon.</p>"}
 <h2>Migration plan</h2>${ranked.length ? `<table><tr><th>#</th><th>Asset</th><th>Priority</th><th>Action</th></tr>${planRows}</table>` : "<p>No actions required at the current horizon. Re-assess when retention requirements or the Q-Day estimate change.</p>"}
 <h2>Network endpoints</h2>${endpoints.length ? `<table><tr><th>Protocol</th><th>Endpoint</th><th>Posture</th><th>Version</th><th>Key exchange in use</th><th>Accepted groups</th><th>Classical fallback</th><th>Protection</th></tr>${endpointRows}</table>` : "<p>No network endpoints in scope.</p>"}
 <h2>Certificates</h2>${certs.length ? `<table><tr><th>Subject</th><th>Issuer</th><th>Key</th><th>Signed with</th><th>Expires</th><th>Seen at</th></tr>${certRows}</table>` : "<p>No certificates observed.</p>"}
