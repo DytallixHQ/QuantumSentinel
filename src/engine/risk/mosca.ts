@@ -6,6 +6,8 @@ export type EffectiveStatus = QuantumStatus | "PLAINTEXT";
 export interface RiskConfig {
   qDayYear: number; // T_Q-Day as a calendar year
   currentYear: number; // injectable for deterministic tests
+  /** Reference date for certificate validity (ISO). Default: today if currentYear is this year, else 1 January of currentYear. */
+  asOf?: string;
   defaults: {
     criticality: number;
     retentionYears: number;
@@ -211,7 +213,8 @@ export class RiskEngine {
     if (!notAfter) return undefined;
     const t = Date.parse(notAfter);
     if (Number.isNaN(t)) return undefined;
-    const now = Date.UTC(this.cfg.currentYear, 0, 1);
+    const now = this.cfg.asOf ? Date.parse(this.cfg.asOf)
+      : this.cfg.currentYear === new Date().getUTCFullYear() ? Date.now() : Date.UTC(this.cfg.currentYear, 0, 1);
     return Math.max(0, (t - now) / YEAR_MS);
   }
 
@@ -260,8 +263,8 @@ export class RiskEngine {
         ...this.g.outgoing(id, ["CONTAINS_KEY", "MOUNTS", "TERMINATES_AT"]).map((e) => e.to),
         ...this.g.outgoing(id, ["DEPENDS_ON"]).map((e) => e.to).filter((t) => this.g.get(t)?.kind !== "CryptoPrimitive"),
       ];
-      for (const t of related) {
-        const r = this.tnflBase(t, stack);
+      const relatedBases = related.map((t) => ({ t, r: this.tnflBase(t, stack) })).sort((a, b) => (b.r.trustYears ?? 0) - (a.r.trustYears ?? 0));
+      for (const { t, r } of relatedBases) {
         if (r.status === undefined) continue;
         if (out.status === undefined || SEVERITY[r.status] > SEVERITY[out.status]) out.status = r.status;
         if (r.trustYears !== undefined) out.trustYears = Math.max(out.trustYears ?? 0, r.trustYears);
@@ -329,7 +332,10 @@ export class RiskEngine {
     const finalStatus: EffectiveStatus = status ?? "UNKNOWN";
     const { score, gap } = moscaScore(criticality, exposure, this.cfg.statusWeight[finalStatus], retention, migration, this.cfg);
     const tnfl = this.tnfl(id, criticality, exposure, migration);
-    const hndl = round(score);
+    // Certificates are identity objects: their quantum risk is forgery (TNFL). Static RSA key transport
+    // is scored on the endpoint that negotiates it, not on the certificate.
+    const isCertificate = v.kind === "CryptoMaterial" && v.materialType === "certificate";
+    const hndl = isCertificate ? 0 : round(score);
     const combinedScore = Math.max(hndl, tnfl.score);
     const primaryThreat = combinedScore <= 0 ? "none" : tnfl.score > hndl ? "TNFL" : "HNDL";
     const res: RiskResult = { id, score: hndl, status: finalStatus, criticality, exposure, retentionYears: retention, migrationYears: migration, moscaGapYears: gap, drivers, tnfl, combinedScore, primaryThreat };

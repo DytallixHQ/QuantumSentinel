@@ -32,6 +32,7 @@ test("domain exports probe the validated address with SNI and build a CBOM + rep
   assert.ok(out.cbom.components.some((c) => c.name === "X25519MLKEM768"));
   assert.match(out.reportHtml, /Post-Quantum Readiness: example\.com/);
   assert.match(out.reportHtml, /X25519MLKEM768, x25519/);
+  assert.match(out.reportHtml, /Discuss an assessment/, "hosted reports end with the call to action");
 });
 
 test("findings exports exclude documentation and keep only metadata", { skip }, async () => {

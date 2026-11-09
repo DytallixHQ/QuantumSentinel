@@ -11,6 +11,8 @@ export interface HtmlReportOptions {
   client?: string;
   generatedAt?: string;
   errors?: Array<{ target: string; error: string }>;
+  /** Optional call to action at the end (hosted scans); omitted from client deliverables. */
+  cta?: { heading: string; text: string; url: string; label: string };
 }
 
 const esc = (v: unknown) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -82,6 +84,7 @@ table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e1
 code{font-size:12.5px;color:#28506e;word-break:break-all}.pill{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;font-weight:600;white-space:nowrap}
 .Critical,.PLAINTEXT,.VULNERABLE_SHOR{background:#fde2e2;color:#9b1c1c}.High,.UNKNOWN{background:#fff0d6;color:#8a4b00}.Medium,.DEGRADED_GROVER{background:#fdf6c8;color:#6b5800}
 .Monitor,.HYBRID{background:#e3effd;color:#1e4f8a}.SAFE_PQC{background:#ddf5e6;color:#17663a}ul{margin:4px 0;padding-left:18px}
+.cta{margin:32px 0;padding:18px 22px;border:1px solid #0f766e;border-radius:10px;background:#effaf7}.cta h2{border:0;margin:0 0 6px;padding:0}.cta a{display:inline-block;background:#0f766e;color:#fff;padding:8px 16px;border-radius:6px;text-decoration:none;font-weight:600}
 .notice{border-left:3px solid #c48a00;background:#fffaf0;padding:10px 14px;margin:18px 0}@media print{body{background:#fff}main{padding:0}h2{break-after:avoid}tr{break-inside:avoid}}`;
 
 const pill = (cls: string, text: string) => `<span class="pill ${esc(cls)}">${esc(text)}</span>`;
@@ -149,7 +152,7 @@ export function buildHtmlReport(g: CryptoGraph, o: HtmlReportOptions): string {
     return `<tr><td>${esc(c.subject)}</td><td>${esc(c.issuer)}</td><td>${esc(key)}</td><td>${esc(sig)}</td><td>${esc((c.notAfter ?? "").slice(0, 10))}</td><td>${where}</td></tr>`;
   }).join("");
 
-  const statusCards = STATUS_ORDER.filter((s) => byStatus.get(s)).map((s) => `<div class="card"><div class="l">${esc(STATUS_LABEL[s])}</div><div class="n">${byStatus.get(s)}</div></div>`).join("");
+  const statusCards = STATUS_ORDER.filter((s) => byStatus.get(s)).map((s) => `<div class="card"><div class="l">Data protection: ${esc(STATUS_LABEL[s])}</div><div class="n">${byStatus.get(s)}</div></div>`).join("");
   const errors = o.errors?.length ? `<h2>Coverage gaps</h2><p class="muted">These targets could not be fully assessed and are not reflected above.</p><table><tr><th>Target</th><th>Reason</th></tr>${o.errors.map((e) => `<tr><td>${esc(e.target)}</td><td>${esc(e.error)}</td></tr>`).join("")}</table>` : "";
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(o.title ?? "Post-Quantum Readiness Assessment")}</title><style>${CSS}</style></head><body><main>
@@ -167,6 +170,7 @@ export function buildHtmlReport(g: CryptoGraph, o: HtmlReportOptions): string {
 <h2>Certificates</h2>${certs.length ? `<table><tr><th>Subject</th><th>Issuer</th><th>Key</th><th>Signed with</th><th>Expires</th><th>Seen at</th></tr>${certRows}</table>` : "<p>No certificates observed.</p>"}
 <h2>Algorithm inventory</h2><table><tr><th>Algorithm</th><th>Usage</th><th>Status</th><th>Classical bits</th><th>NIST PQ category</th><th>Used by</th></tr>${primRows}</table>
 ${errors}
+${o.cta && /^https:\/\//.test(o.cta.url) ? `<div class="cta"><h2>${esc(o.cta.heading)}</h2><p>${esc(o.cta.text)}</p><p><a href="${esc(o.cta.url)}">${esc(o.cta.label)}</a></p></div>` : ""}
 <h2>Method and limits</h2><ul><li>Network: TLS ClientHello, SSH KEXINIT and IKEv2 IKE_SA_INIT observation; no exploitation and no application data.</li><li>Files: content-sniffed certificates, keys and keystores; private keys and encrypted containers are never read out or decrypted.</li><li>Cloud: key metadata only (type, size, allowed operations).</li><li>Code: static references; reachability is not proven.</li><li>The machine-readable CycloneDX 1.7 CBOM accompanies this report.</li></ul>
 </main></body></html>`;
 }

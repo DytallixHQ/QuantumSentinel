@@ -4,6 +4,13 @@
 
 const ENGINE_TIMEOUT_MS = 3_000;
 
+export const HOSTED_CTA = {
+  heading: "Assess your whole infrastructure",
+  text: "This free scan covers one asset. A full QuantumSentinel assessment extends the same checks to your connections, VPN gateways, certificates and signing keys, code, and cloud key managers, and ranks every system by harvest-now, decrypt-later and trust-now, forge-later risk.",
+  url: "https://www.dytallix.com/contact?topic=QuantumSentinel",
+  label: "Discuss an assessment",
+};
+
 export function exportsSupported() {
   return Boolean(process.features?.typescript);
 }
@@ -25,7 +32,7 @@ function finish(e, graph, { title, client, errors = [], now }) {
   const risk = e.scoreGraph(graph, riskConfig);
   return {
     cbom: e.buildCycloneDxCbom(graph, { risk, toolVersion: "hosted", timestamp: now }),
-    reportHtml: e.buildHtmlReport(graph, { risk, riskConfig, title, client, errors, generatedAt: now }),
+    reportHtml: e.buildHtmlReport(graph, { risk, riskConfig, title, client, errors, generatedAt: now, cta: HOSTED_CTA }),
   };
 }
 
