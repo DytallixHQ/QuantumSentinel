@@ -3,7 +3,7 @@ import test from "node:test";
 import { addAlgorithm } from "../../core/graph/builders.ts";
 import { CryptoGraph } from "../../core/graph/graph.ts";
 import type { NetworkEndpoint, ServiceGroup } from "../../core/graph/types.ts";
-import { moscaScore, resolveRiskConfig, scoreGraph } from "./mosca.ts";
+import { moscaScore, moscaUncertain, resolveRiskConfig, scoreGraph } from "./mosca.ts";
 
 const cfg = resolveRiskConfig({ qDayYear: 2033, currentYear: 2026, asOf: "2026-01-01T00:00:00Z" });
 const ev = [{ source: "config" as const, locator: "test", observedAt: "2026-01-01T00:00:00Z" }];
@@ -159,4 +159,69 @@ test("ranking uses max(HNDL, TNFL)", () => {
   g.addVertex(ep("legacy", "TCP", "internal"));
   const ranked = scoreGraph(g, cfg);
   for (let i = 1; i < ranked.length; i++) assert.ok(ranked[i - 1].combinedScore >= ranked[i].combinedScore);
+});
+
+function dependencyCycle(order: string[]) {
+  const g = new CryptoGraph();
+  const add: Record<string, () => void> = {
+    a: () => g.addVertex<ServiceGroup>({ id: "a", kind: "ServiceGroup", label: "a", evidence: ev, criticality: 8 }),
+    b: () => g.addVertex<ServiceGroup>({ id: "b", kind: "ServiceGroup", label: "b", evidence: ev, criticality: 8 }),
+    db: () => g.addVertex(ep("db", "TLS", "external", { retentionYears: 10 })),
+  };
+  for (const k of order) add[k]();
+  g.addEdge("db", "ENCRYPTED_WITH", addAlgorithm(g, { name: "X25519", usage: "key-exchange" }, ev));
+  g.addEdge("a", "DEPENDS_ON", "db");
+  g.addEdge("a", "DEPENDS_ON", "b");
+  g.addEdge("b", "DEPENDS_ON", "a");
+  return new Map(scoreGraph(g, cfg).map((r) => [r.id, r]));
+}
+
+test("dependency cycle: scores do not depend on vertex order", () => {
+  const x = dependencyCycle(["a", "b", "db"]);
+  const y = dependencyCycle(["b", "a", "db"]);
+  for (const id of ["a", "b", "db"]) assert.equal(x.get(id)!.score, y.get(id)!.score, id);
+  // b reaches db through a: it inherits the Shor exposure (before the fix it scored 2 when a came first).
+  assert.equal(x.get("b")!.status, "VULNERABLE_SHOR");
+  assert.equal(x.get("b")!.score, x.get("a")!.score);
+});
+
+test("uncertain Q-Day: probability and expected exposure years (paper worked example)", () => {
+  const d = resolveRiskConfig({
+    currentYear: 2026,
+    qDayDistribution: [{ year: 2034, p: 0.2 }, { year: 2038, p: 0.4 }, { year: 2046, p: 0.3 }],
+  });
+  const r = moscaUncertain(21, d);
+  assert.ok(Math.abs(r.probability - 0.9) < 1e-12);
+  assert.ok(Math.abs(r.exposureYears - 6.5) < 1e-12);
+  // Strict inequality: Q-Day exactly at c does not count.
+  assert.ok(Math.abs(moscaUncertain(20, d).probability - 0.6) < 1e-12);
+  assert.equal(moscaUncertain(2, d).probability, 0);
+});
+
+test("uncertain Q-Day: no distribution reduces to the point estimate hinge", () => {
+  // 7 years to 2033.
+  assert.deepEqual(moscaUncertain(8, cfg), { probability: 1, exposureYears: 1 });
+  assert.deepEqual(moscaUncertain(7, cfg), { probability: 0, exposureYears: 0 });
+});
+
+test("uncertain Q-Day: invalid distributions are refused", () => {
+  assert.throws(() => moscaUncertain(5, resolveRiskConfig({ currentYear: 2026, qDayDistribution: [{ year: 2030, p: 0.7 }, { year: 2031, p: 0.7 }] })));
+  assert.throws(() => moscaUncertain(5, resolveRiskConfig({ currentYear: 2026, qDayDistribution: [{ year: 2030, p: -0.1 }] })));
+});
+
+test("uncertain Q-Day: score keeps the point estimate; normalizedScore is in [0,1]", () => {
+  const withDist = resolveRiskConfig({
+    qDayYear: 2033, currentYear: 2026, asOf: "2026-01-01T00:00:00Z",
+    qDayDistribution: [{ year: 2030, p: 0.5 }, { year: 2040, p: 0.5 }],
+  });
+  const a = new Map(scoreGraph(propagationGraph("X25519"), cfg).map((x) => [x.id, x]));
+  const b = new Map(scoreGraph(propagationGraph("X25519"), withDist).map((x) => [x.id, x]));
+  for (const [id, r] of a) {
+    assert.equal(b.get(id)!.score, r.score, id);
+    assert.ok(b.get(id)!.normalizedScore >= 0 && b.get(id)!.normalizedScore <= 1, id);
+  }
+  // db: retention 10 + migration 3 = 13 years; Q-Day in 4 years (p .5) or 14 (p .5) -> probability 0.5.
+  assert.equal(b.get("db")!.probability, 0.5);
+  assert.equal(b.get("db")!.exposureYears, 0.5 * 9);
+  assert.equal(b.get("db")!.normalizedScore, 0.9 * 1 * 1 * 0.5);
 });

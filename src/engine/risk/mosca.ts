@@ -1,10 +1,17 @@
 import type { CryptoGraph } from "../../core/graph/graph.ts";
 import type { CryptoPrimitive, QuantumStatus, Vertex } from "../../core/graph/types.ts";
+import { SccSolver } from "./scc.ts";
 
 export type EffectiveStatus = QuantumStatus | "PLAINTEXT";
 
 export interface RiskConfig {
   qDayYear: number; // T_Q-Day as a calendar year
+  /**
+   * Optional distribution over the Q-Day year: probability mass per calendar year. Mass left over
+   * (1 - sum of p) means no CRQC within the planning horizon. When set, `probability` and
+   * `exposureYears` use it; `score` keeps the point estimate qDayYear, so rankings stay comparable.
+   */
+  qDayDistribution?: Array<{ year: number; p: number }>;
   currentYear: number; // injectable for deterministic tests
   /** Reference date for certificate validity (ISO). Default: today if currentYear is this year, else 1 January of currentYear. */
   asOf?: string;
@@ -50,6 +57,12 @@ export interface RiskResult {
   migrationYears: number;
   /** (T_retention + T_migration) - (T_Q-Day - now), before max(0, .) */
   moscaGapYears: number;
+  /** Pr[Q-Day comes before retention + migration ends]: Mosca's inequality is violated. In [0,1]. */
+  probability: number;
+  /** E[max(0, retention + migration - years to Q-Day)]: expected years of exposure. */
+  exposureYears: number;
+  /** (C/10) * E * V * probability, in [0,1]; comparable across Q-Day assumptions. */
+  normalizedScore: number;
   drivers: string[];
   /** Trust now, forge later: signatures that must stay unforgeable past Q-Day. */
   tnfl: TnflResult;
@@ -66,6 +79,9 @@ export interface TnflResult {
   trustYears: number;
   /** (T_trust + T_migration) - (T_Q-Day - now), before max(0, .) */
   gapYears: number;
+  probability: number;
+  exposureYears: number;
+  normalizedScore: number;
   drivers: string[];
 }
 
@@ -82,6 +98,17 @@ const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x
 // certificates are classified "public-key" and authenticate the holder.
 const SIGNATURE_USAGES = new Set(["signature", "public-key"]);
 const YEAR_MS = 365.25 * 86_400_000;
+
+interface BaseValue {
+  status?: EffectiveStatus;
+  drivers: string[];
+}
+
+interface EffValue {
+  status?: EffectiveStatus;
+  exposure: number;
+  drivers: string[];
+}
 
 interface TnflBase {
   status?: EffectiveStatus;
@@ -103,13 +130,61 @@ export function moscaScore(c: number, e: number, v: number, retentionYears: numb
   return { score: clamp(c, 1, 10) * clamp(e, 0.1, 1) * v * Math.max(0, gap), gap };
 }
 
+function qDayMass(cfg: RiskConfig): Array<{ years: number; p: number }> {
+  const d = cfg.qDayDistribution;
+  if (!d || d.length === 0) return [{ years: cfg.qDayYear - cfg.currentYear, p: 1 }];
+  let total = 0;
+  for (const { year, p } of d) {
+    if (!Number.isFinite(year) || !Number.isFinite(p) || p < 0) throw new Error("qDayDistribution: each entry needs a finite year and p >= 0");
+    total += p;
+  }
+  if (total > 1 + 1e-9) throw new Error(`qDayDistribution: probabilities sum to ${total}, more than 1`);
+  return d.map(({ year, p }) => ({ years: year - cfg.currentYear, p }));
+}
+
+/**
+ * Mosca's inequality under an uncertain Q-Day Q (years from now), for c = retention (or trust) + migration:
+ *   probability   = Pr[Q < c]
+ *   exposureYears = E[max(0, c - Q)] = integral_0^c F(t) dt
+ * With no distribution, Q is the constant qDayYear - currentYear: probability is 1 when the gap is
+ * positive (else 0) and exposureYears is max(0, gap), the hinge used by `score`.
+ */
+export function moscaUncertain(c: number, cfg: RiskConfig): { probability: number; exposureYears: number } {
+  let probability = 0;
+  let exposureYears = 0;
+  for (const { years, p } of qDayMass(cfg)) {
+    if (years < c) probability += p;
+    exposureYears += p * Math.max(0, c - Math.max(0, years));
+  }
+  return { probability: Math.min(1, probability), exposureYears };
+}
+
+function uncertainFields(c: number, e: number, v: number, years: number, cfg: RiskConfig) {
+  const { probability, exposureYears } = moscaUncertain(years, cfg);
+  return {
+    probability: round(probability),
+    exposureYears: round(exposureYears),
+    normalizedScore: round((clamp(c, 1, 10) / 10) * clamp(e, 0.1, 1) * v * probability),
+  };
+}
+
 export class RiskEngine {
   private readonly cfg: RiskConfig;
   private readonly g: CryptoGraph;
-  private readonly baseMemo = new Map<string, { status?: EffectiveStatus; drivers: string[] }>();
-  private readonly effMemo = new Map<string, { status?: EffectiveStatus; exposure: number; drivers: string[] }>();
-  private readonly results = new Map<string, RiskResult>();
-  private readonly tnflMemo = new Map<string, TnflBase>();
+  // One solver per propagation relation; each is order-independent on cycles (see scc.ts).
+  private readonly baseSolver = new SccSolver<BaseValue>(
+    (id) => (this.g.get(id)!.kind === "CryptoPrimitive" ? [] : this.g.outgoing(id, ["MOUNTS"]).map((e) => e.to)),
+    (id, get) => this.baseLocal(id, get),
+  );
+  private readonly effSolver = new SccSolver<EffValue>(
+    (id) => this.g.outgoing(id, ["TERMINATES_AT"]).map((e) => e.to),
+    (id, get) => this.effectiveLocal(id, get),
+  );
+  private readonly tnflSolver = new SccSolver<TnflBase>((id) => this.tnflRelated(id), (id, get) => this.tnflLocal(id, get));
+  private readonly scoreSolver = new SccSolver<RiskResult>(
+    (id) => this.g.outgoing(id, ["DEPENDS_ON"]).map((e) => e.to).filter((t) => this.g.get(t)!.kind !== "CryptoPrimitive"),
+    (id, get) => this.scoreLocal(id, get),
+  );
 
   constructor(graph: CryptoGraph, cfg: RiskConfig = DEFAULT_RISK_CONFIG) {
     this.g = graph;
@@ -123,11 +198,11 @@ export class RiskEngine {
   }
 
   /** Crypto that directly protects v (own primitives, held material, mounted volumes). */
-  private base(id: string, stack = new Set<string>()): { status?: EffectiveStatus; drivers: string[] } {
-    const memo = this.baseMemo.get(id);
-    if (memo) return memo;
-    if (stack.has(id)) return { drivers: [] };
-    stack.add(id);
+  private base(id: string): BaseValue {
+    return this.baseSolver.get(id);
+  }
+
+  private baseLocal(id: string, get: (child: string) => BaseValue | undefined): BaseValue {
     const v = this.g.get(id)!;
     let out: { status?: EffectiveStatus; drivers: string[] };
     if (v.kind === "CryptoPrimitive") {
@@ -154,8 +229,8 @@ export class RiskEngine {
       let status = worstStatus(relevant.map((p) => p.status));
       const drivers = relevant.filter((p) => p.status === status).map((p) => `${p.algorithm} (${p.usage}): ${p.status}`);
       for (const e of this.g.outgoing(id, ["MOUNTS"])) {
-        const m = this.base(e.to, stack);
-        if (m.status && (status === undefined || SEVERITY[m.status] > SEVERITY[status])) {
+        const m = get(e.to);
+        if (m?.status && (status === undefined || SEVERITY[m.status] > SEVERITY[status])) {
           status = m.status;
           drivers.push(`mounted ${e.to}: ${m.status}`);
         }
@@ -167,8 +242,6 @@ export class RiskEngine {
       }
       out = { status, drivers: [...new Set(drivers)] };
     }
-    stack.delete(id);
-    this.baseMemo.set(id, out);
     return out;
   }
 
@@ -181,18 +254,19 @@ export class RiskEngine {
    * Effective protection after TERMINATES_AT: traffic for a backend crosses the network
    * under the terminator's crypto, so the backend inherits the terminator's status and exposure.
    */
-  private effective(id: string, stack = new Set<string>()): { status?: EffectiveStatus; exposure: number; drivers: string[] } {
-    const memo = this.effMemo.get(id);
-    if (memo) return memo;
+  private effective(id: string): EffValue {
+    return this.effSolver.get(id);
+  }
+
+  private effectiveLocal(id: string, get: (child: string) => EffValue | undefined): EffValue {
     const v = this.g.get(id)!;
     const own = this.base(id);
-    if (stack.has(id)) return { status: own.status, exposure: this.ownExposure(v), drivers: own.drivers };
-    stack.add(id);
     let status = own.status;
     let exposure = this.ownExposure(v);
     const drivers = [...own.drivers];
     for (const e of this.g.outgoing(id, ["TERMINATES_AT"])) {
-      const t = this.effective(e.to, stack);
+      const t = get(e.to);
+      if (!t) continue;
       if (t.exposure > exposure) {
         exposure = t.exposure;
         drivers.push(`exposure ${t.exposure} inherited via TERMINATES_AT ${e.to}`);
@@ -202,10 +276,7 @@ export class RiskEngine {
         status = status === "PLAINTEXT" ? t.status : worstStatus([t.status, ...(status ? [status] : [])]);
       }
     }
-    stack.delete(id);
-    const out = { status, exposure, drivers };
-    this.effMemo.set(id, out);
-    return out;
+    return { status, exposure, drivers };
   }
 
   /** Years from now until a certificate's notAfter (fractional), or undefined. */
@@ -223,11 +294,21 @@ export class RiskEngine {
    * they must stay unforgeable. Certificates use their remaining validity (long-lived roots dominate);
    * signing keys without a validity use trustYears; holders and groups take the worst of what they hold.
    */
-  private tnflBase(id: string, stack = new Set<string>()): TnflBase {
-    const memo = this.tnflMemo.get(id);
-    if (memo) return memo;
-    if (stack.has(id)) return { drivers: [] };
-    stack.add(id);
+  private tnflBase(id: string): TnflBase {
+    return this.tnflSolver.get(id);
+  }
+
+  /** Held certificates/keys, member assets, and the terminator that authenticates for us. */
+  private tnflRelated(id: string): string[] {
+    const v = this.g.get(id)!;
+    if (v.kind === "CryptoMaterial" || v.kind === "CryptoPrimitive") return [];
+    return [
+      ...this.g.outgoing(id, ["CONTAINS_KEY", "MOUNTS", "TERMINATES_AT"]).map((e) => e.to),
+      ...this.g.outgoing(id, ["DEPENDS_ON"]).map((e) => e.to).filter((t) => this.g.get(t)?.kind !== "CryptoPrimitive"),
+    ];
+  }
+
+  private tnflLocal(id: string, get: (child: string) => TnflBase | undefined): TnflBase {
     const v = this.g.get(id)!;
     const out: TnflBase = { drivers: [] };
     const consider = (status: EffectiveStatus | undefined, trust: number | undefined, driver: string) => {
@@ -258,12 +339,10 @@ export class RiskEngine {
     } else if (v.kind !== "CryptoPrimitive") {
       // Direct authentication primitives (SSH host keys, code-signing references).
       for (const p of sigPrims(id, ["ENCRYPTED_WITH", "DEPENDS_ON"])) consider(p.status, defaultTrust, `${p.algorithm} ${p.usage === "signature" ? "signatures" : "identity key"}`);
-      // Held certificates/keys, member assets, and the terminator that authenticates for us.
-      const related = [
-        ...this.g.outgoing(id, ["CONTAINS_KEY", "MOUNTS", "TERMINATES_AT"]).map((e) => e.to),
-        ...this.g.outgoing(id, ["DEPENDS_ON"]).map((e) => e.to).filter((t) => this.g.get(t)?.kind !== "CryptoPrimitive"),
-      ];
-      const relatedBases = related.map((t) => ({ t, r: this.tnflBase(t, stack) })).sort((a, b) => (b.r.trustYears ?? 0) - (a.r.trustYears ?? 0));
+      const relatedBases = this.tnflRelated(id)
+        .map((t) => ({ t, r: get(t) }))
+        .filter((x): x is { t: string; r: TnflBase } => x.r !== undefined)
+        .sort((a, b) => (b.r.trustYears ?? 0) - (a.r.trustYears ?? 0));
       for (const { t, r } of relatedBases) {
         if (r.status === undefined) continue;
         if (out.status === undefined || SEVERITY[r.status] > SEVERITY[out.status]) out.status = r.status;
@@ -282,25 +361,27 @@ export class RiskEngine {
       }
     }
     out.drivers = [...new Set(out.drivers)].slice(0, 6);
-    stack.delete(id);
-    this.tnflMemo.set(id, out);
     return out;
   }
 
   private tnfl(id: string, criticality: number, exposure: number, migration: number): TnflResult {
     const v = this.g.get(id)!;
     const b = this.tnflBase(id);
-    if (b.status === undefined || b.trustYears === undefined) return { score: 0, status: b.status, trustYears: b.trustYears ?? 0, gapYears: 0, drivers: b.drivers };
+    if (b.status === undefined || b.trustYears === undefined)
+      return { score: 0, status: b.status, trustYears: b.trustYears ?? 0, gapYears: 0, probability: 0, exposureYears: 0, normalizedScore: 0, drivers: b.drivers };
     const c = Math.max(criticality, v.criticality === undefined ? b.criticality ?? 0 : 0) || criticality;
     const e = Math.max(exposure, b.exposure ?? 0);
     const trust = Math.round(b.trustYears * 10) / 10; // planning precision: 0.1 year
     const { score, gap } = moscaScore(c, e, this.cfg.statusWeight[b.status], trust, migration, this.cfg);
-    return { score: round(score), status: b.status, trustYears: trust, gapYears: round(gap), drivers: b.drivers };
+    const u = uncertainFields(c, e, this.cfg.statusWeight[b.status], trust + migration, this.cfg);
+    return { score: round(score), status: b.status, trustYears: trust, gapYears: round(gap), ...u, drivers: b.drivers };
   }
 
-  private score(id: string, stack = new Set<string>()): RiskResult {
-    const done = this.results.get(id);
-    if (done) return done;
+  private score(id: string): RiskResult {
+    return this.scoreSolver.get(id);
+  }
+
+  private scoreLocal(id: string, get: (child: string) => RiskResult | undefined): RiskResult {
     const v = this.g.get(id)!;
     const d = this.cfg.defaults;
     const eff = this.effective(id);
@@ -312,12 +393,12 @@ export class RiskEngine {
     const drivers = [...eff.drivers];
 
     // DEPENDS_ON members propagate risk up to their parent (cluster / application).
-    if (!stack.has(id)) {
-      stack.add(id);
+    {
       for (const e of this.g.outgoing(id, ["DEPENDS_ON"])) {
         const child = this.g.get(e.to)!;
         if (child.kind === "CryptoPrimitive") continue; // already in base()
-        const r = this.score(e.to, stack);
+        const r = get(e.to);
+        if (!r) continue;
         if (status === undefined || SEVERITY[r.status] > SEVERITY[status]) status = r.status;
         if (r.exposure > exposure) exposure = r.exposure;
         if (v.kind === "ServiceGroup") {
@@ -326,7 +407,6 @@ export class RiskEngine {
         }
         if (r.score > 0) drivers.push(`depends on ${e.to} (R=${round(r.score)}, ${r.status}, E=${r.exposure})`);
       }
-      stack.delete(id);
     }
     criticality = clamp(criticality, 1, 10);
     const finalStatus: EffectiveStatus = status ?? "UNKNOWN";
@@ -336,17 +416,18 @@ export class RiskEngine {
     // is scored on the endpoint that negotiates it, not on the certificate.
     const isCertificate = v.kind === "CryptoMaterial" && v.materialType === "certificate";
     const hndl = isCertificate ? 0 : round(score);
+    const u = isCertificate
+      ? { probability: 0, exposureYears: 0, normalizedScore: 0 }
+      : uncertainFields(criticality, exposure, this.cfg.statusWeight[finalStatus], retention + migration, this.cfg);
     const combinedScore = Math.max(hndl, tnfl.score);
     const primaryThreat = combinedScore <= 0 ? "none" : tnfl.score > hndl ? "TNFL" : "HNDL";
-    const res: RiskResult = { id, score: hndl, status: finalStatus, criticality, exposure, retentionYears: retention, migrationYears: migration, moscaGapYears: gap, drivers, tnfl, combinedScore, primaryThreat };
-    this.results.set(id, res);
-    return res;
+    return { id, score: hndl, status: finalStatus, criticality, exposure, retentionYears: retention, migrationYears: migration, moscaGapYears: gap, ...u, drivers, tnfl, combinedScore, primaryThreat };
   }
 
   /** Score every non-primitive vertex (primitives are inputs, not assets). Sorted by max(HNDL, TNFL) desc, then id. */
   run(): RiskResult[] {
-    for (const v of this.g.allVertices()) if (v.kind !== "CryptoPrimitive") this.score(v.id);
-    return [...this.results.values()].sort((a, b) => b.combinedScore - a.combinedScore || b.score - a.score || a.id.localeCompare(b.id));
+    const results = this.g.allVertices().filter((v) => v.kind !== "CryptoPrimitive").map((v) => this.score(v.id));
+    return results.sort((a, b) => b.combinedScore - a.combinedScore || b.score - a.score || a.id.localeCompare(b.id));
   }
 }
 
